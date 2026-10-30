@@ -265,6 +265,11 @@ pub fn parse_line(input: &str) -> IResult<&str, ParsedInstruction> {
             parse_rets,
             // parse_usect,
             parse_addi,
+            parse_addk,
+            parse_cmpi,
+            parse_clr,
+            parse_calli,
+            parse_movi,
         )),
     ))(input)
 }
@@ -275,13 +280,16 @@ pub fn parse_identifier(input: &str) -> IResult<&str, &str> {
 }
 
 /// Parse a JR (Jump Relative) instruction (e.g., "JR START_LOOP")
+/// Parse JR or JRUC (Jump Relative / Unconditional) instruction (e.g., "JRUC _ac_loop")
 pub fn parse_jr(input: &str) -> IResult<&str, ParsedInstruction> {
-    let (input, _) = tag_no_case("JR")(input)?;
+    let (input, _) = alt((
+        tag_no_case("JRUC"),
+        tag_no_case("JR")
+    ))(input)?;
     let (input, _) = multispace1(input)?;
     let (input, label) = parse_identifier(input)?; 
     Ok((input, ParsedInstruction::Jr { label: label.to_string() }))
 }
-
 /// Parse a CALL instruction (e.g., "CALL SUBROUTINE")
 pub fn parse_call(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = tag_no_case("CALL")(input)?;
@@ -440,11 +448,14 @@ pub fn parse_cmp(input: &str) -> IResult<&str, ParsedInstruction> {
     )(input)
 }
 
-// Parse JLT instruction: JLT target
+/// Parse JLT or JRLT instruction (e.g., "JRLT map_ok")
 pub fn parse_jlt(input: &str) -> IResult<&str, ParsedInstruction> {
     map(
         preceded(
-            tuple((tag_no_case("JLT"), space1)),
+            tuple((
+                alt((tag_no_case("JRLT"), tag_no_case("JLT"))),
+                space1,
+            )),
             take_while1(|c: char| c.is_alphanumeric() || c == '_'),
         ),
         |target: &str| ParsedInstruction::Jlt {
@@ -655,4 +666,80 @@ pub fn parse_addi(input: &str) -> IResult<&str, ParsedInstruction> {
         src: Operand::Immediate(val), 
         dst 
     }))
+}
+
+/// Parse ADDK instruction (e.g., "ADDK 1, A0" -> translates to Add with Immediate)
+pub fn parse_addk(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("ADDK")(input)?;
+    let (input, _) = multispace1(input)?;
+    
+    // Parse the quick constant value
+    let (input, val) = parse_number(input)?;
+    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
+    let (input, dst) = parse_operand(input)?;
+
+    Ok((input, ParsedInstruction::Add { 
+        src: Operand::Immediate(val), 
+        dst 
+    }))
+}
+
+/// Parse CMPI instruction (e.g., "CMPI 5, A0" -> translates to Cmp with Immediate source)
+pub fn parse_cmpi(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("CMPI")(input)?;
+    let (input, _) = multispace1(input)?;
+    
+    // Parse immediate number value
+    let (input, val) = parse_number(input)?;
+    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
+    let (input, dst) = parse_operand(input)?;
+
+    Ok((input, ParsedInstruction::Cmp { 
+        src: Operand::Immediate(val), 
+        dst 
+    }))
+}
+
+/// Parse CLR instruction (e.g., "CLR A0" -> translates to MOVE #0, A0)
+pub fn parse_clr(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("CLR")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, dst) = parse_operand(input)?;
+
+    Ok((input, ParsedInstruction::Move { 
+        src: Operand::Immediate(0), 
+        dst 
+    }))
+}
+
+/// Parse MOVI instruction (supports both "MOVI #map_ok, A0" and "MOVI map_ok, A0")
+pub fn parse_movi(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("MOVI")(input)?;
+    let (input, _) = multispace1(input)?;
+    
+    // Try standard operand first (handles #), then fallback to bare number or symbol identifier
+    let (input, src) = alt((
+        parse_operand,
+        map(parse_number, Operand::Immediate),
+        map(parse_identifier, |s: &str| {
+            if let Ok(n) = s.parse::<i32>() {
+                Operand::Immediate(n)
+            } else {
+                Operand::Symbol(s.to_string())
+            }
+        }),
+    ))(input)?;
+
+    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
+    let (input, dst) = parse_operand(input)?;
+
+    Ok((input, ParsedInstruction::Move { src, dst }))
+}
+
+/// Parse CALLI instruction (e.g., "CALLI map_ok" -> translates to Call with immediate/symbol target)
+pub fn parse_calli(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("CALLI")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, label) = parse_identifier(input)?;
+    Ok((input, ParsedInstruction::Call { label: label.to_string() }))
 }
