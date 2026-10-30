@@ -107,7 +107,7 @@ impl Assembler {
             let mut trimmed = clean_line.trim();
             let upper_trimmed = trimmed.to_uppercase();
 
-            // 1a. Check for Single-Line Macros (e.g. "DIE    .macro    jauc    SUCIDE    .endm")
+            // 1a. Check for Single-Line Macros
             if upper_trimmed.contains(".MACRO") && upper_trimmed.contains(".ENDM") {
                 if let Some(macro_idx) = upper_trimmed.find(".MACRO") {
                     let name = trimmed[..macro_idx].trim().to_uppercase();
@@ -158,7 +158,7 @@ impl Assembler {
 
             let line_num = idx; // approximate
 
-            // 4. Check for .equ Equates FIRST (before labels, so "LABEL .equ 56" parses correctly)
+            // 4. Check for .equ Equates FIRST (before labels)
             if upper_trimmed.contains(".EQU") {
                 match parser::parse_equ(trimmed) {
                     Ok((_, Instruction::Equ { name, value })) => {
@@ -183,7 +183,7 @@ impl Assembler {
                 ));
             }
 
-            // 6. Check if this line is a Macro Invocation (first word matches a stored macro)
+            // 6. Check if this line is a Macro Invocation
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
             if !parts.is_empty() {
                 let potential_macro_name = parts[0].to_uppercase();
@@ -212,7 +212,7 @@ impl Assembler {
                 }
             }
 
-            // 7. Check for Labels (supports "LABEL:", "LABEL .word ...", and lone "LABEL")
+            // 7. Check for Labels
             let mut is_label = false;
             let mut label_name_to_insert = String::new();
 
@@ -225,18 +225,16 @@ impl Assembler {
                     let first_word = parts[0];
                     let upper_first = first_word.to_uppercase();
                     
-                    let is_opcode = matches!(upper_first.as_str(), "MOVE" | "ADD" | "SUB" | "CMP" | "JMP" | "NOP" | "RETS" | "SLL" | "SRL" | "AND" | "OR" | "XOR");
+                    let is_opcode = matches!(upper_first.as_str(), "MOVE" | "ADD" | "SUB" | "CMP" | "JMP" | "NOP" | "RETS" | "SLL" | "SRL" | "AND" | "OR" | "XOR" | "MOVI");
                     let is_directive = first_word.starts_with('.');
                     let is_macro = self.macro_table.contains_key(&upper_first);
 
                     if !is_opcode && !is_directive && !is_macro && first_word.chars().all(|c| c.is_alphanumeric() || c == '_') {
                         if parts.len() == 1 {
-                            // Lone label on its own line (e.g. "ALARM_TAB")
                             label_name_to_insert = first_word.to_string();
                             is_label = true;
                             trimmed = &trimmed[first_word.len()..].trim();
                         } else {
-                            // Colon-less label followed by a directive/macro on the same line
                             let second_word = parts[1];
                             if second_word.starts_with('.') || self.macro_table.contains_key(&second_word.to_uppercase()) {
                                 label_name_to_insert = first_word.to_string();
@@ -254,7 +252,6 @@ impl Assembler {
                 if trimmed.is_empty() {
                     continue;
                 }
-                // If there is still a directive/instruction on the same line after stripping the label, let it continue down!
             }
 
             // 8. Check for Directives (e.g. ".WORD")
@@ -287,8 +284,43 @@ impl Assembler {
                 }
             }
 
-            // 9. Parse Instructions (NOP, MOVE, etc.)
-            match parser::parse_line(trimmed) {
+            // Check for mmtm / mmfm stack instructions
+            if upper_trimmed.starts_with("MMTM") || upper_trimmed.starts_with("MMFM") {
+                let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
+                if !parts.is_empty() {
+                    let name = parts[0].to_uppercase();
+                    let args: Vec<String> = if parts.len() > 1 {
+                        parts[1].split(',').map(|s| s.trim().to_string()).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    
+                    self.current_address += 4; 
+
+                    ast.push(Instruction::Directive { 
+                        name, 
+                        args 
+                    });
+                    continue;
+                }
+            }
+
+            // 9. Parse Instructions (NOP, MOVE, MOVI, etc.) with movi translation and size suffix stripping
+            let mut parser_trimmed = trimmed.to_string();
+            let upper_pt = parser_trimmed.to_uppercase();
+            if (upper_pt.starts_with("MOVI") || upper_pt.starts_with("ADD") || upper_pt.starts_with("SUB")) 
+                && (parser_trimmed.ends_with(",L") || parser_trimmed.ends_with(",W") || parser_trimmed.ends_with(",l") || parser_trimmed.ends_with(",w")) 
+            {
+                parser_trimmed = parser_trimmed[..parser_trimmed.len() - 2].trim().to_string();
+            }
+
+            let upper_pt_2 = parser_trimmed.to_uppercase();
+            if upper_pt_2.starts_with("MOVI") {
+                let remainder = parser_trimmed[4..].trim();
+                parser_trimmed = format!("move\t#{}", remainder);
+            }
+
+            match parser::parse_line(&parser_trimmed) {
                 Ok((_, instruction)) => {
                     match &instruction {
                         Instruction::Move { src, dst } 
