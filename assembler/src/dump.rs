@@ -57,6 +57,8 @@ fn describe(instr: &ParsedInstruction) -> String {
         ParsedInstruction::Sub { src, dst } => format!("SUB {}, {}", fmt_operand(src), fmt_operand(dst)),
         ParsedInstruction::Sll { src, dst } => format!("SLL {}, {}", fmt_operand(src), fmt_operand(dst)),
         ParsedInstruction::Srl { src, dst } => format!("SRL {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::Sla { src, dst } => format!("SLA {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::Sra { src, dst } => format!("SRA {}, {}", fmt_operand(src), fmt_operand(dst)),
         ParsedInstruction::Jr { label } => format!("JR {}", label),
         ParsedInstruction::Call { label } => format!("CALL {}", label),
         ParsedInstruction::Jeq { label } => format!("JEQ {}", label),
@@ -72,7 +74,8 @@ fn describe(instr: &ParsedInstruction) -> String {
         ParsedInstruction::Jmp { target } => format!("JMP {}", fmt_operand(target)),
         ParsedInstruction::Rets => "RETS".to_string(),
         ParsedInstruction::Usect { name, section, args } => format!(".usect {} {} {}", name, section, args.join(", ")),
-
+        ParsedInstruction::Trap { vector } => format!("TRAP {}", vector),
+        ParsedInstruction::Movb { src, dst } => format!("MOVB {}, {}", fmt_operand(src), fmt_operand(dst)),
     }
 }
 

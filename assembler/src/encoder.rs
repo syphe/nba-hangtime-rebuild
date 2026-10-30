@@ -37,15 +37,14 @@ pub fn encode_instruction(
         ParsedInstruction::Nop => {
             bytes.extend_from_slice(&0x0000u16.to_le_bytes());
         }
-        ParsedInstruction::Equ { name, value } => {
-            // Equates are handled in pass one / symbol table, 
-            // but if reached here during encode, no code bytes generated.
+        ParsedInstruction::Equ { .. } => {
+            // Equates are handled in pass one / symbol table
         }
-        ParsedInstruction::Label(_label) => {
+        ParsedInstruction::Label(_) => {
             // Labels generate no bytes
         }
         ParsedInstruction::Usect { .. } => {
-            // .usect allocates uninitialized RAM space; no bytes emitted into ROM
+            // .usect allocates uninitialized RAM space; no ROM bytes emitted
         }
         ParsedInstruction::Directive { name, args } => {
             if name.eq_ignore_ascii_case(".WORD") {
@@ -61,7 +60,6 @@ pub fn encode_instruction(
                     } else if let Ok(n) = arg.parse::<i32>() {
                         Ok(n)
                     } else {
-                        // Try resolving as a symbol equate or label
                         symbols.get(arg)
                             .copied()
                             .map(|v| v as i32)
@@ -80,14 +78,13 @@ pub fn encode_instruction(
         | ParsedInstruction::Jeq { label } 
         | ParsedInstruction::Jne { label } => {
             let target_addr = symbols.get(label)
+                .copied()
                 .ok_or_else(|| EncodeError::UndefinedLabel(label.clone()))?;
 
             let pc_next = current_addr + 2;
-            let offset_bytes = (*target_addr as i32) - (pc_next as i32);
+            let offset_bytes = (target_addr as i32) - (pc_next as i32);
             let word_offset = (offset_bytes / 2) as i16;
 
-            // The offset field is 8 bits wide, so the signed range is -128..127
-            // words. Out-of-range offsets must be rejected, not silently truncated.
             if word_offset < -128 || word_offset > 127 {
                 return Err(EncodeError::BranchOutOfRange {
                     label: label.clone(),
@@ -109,7 +106,6 @@ pub fn encode_instruction(
         }
         ParsedInstruction::Move { src, dst } => {
             match (src, dst) {
-                // Existing: Immediate / Symbol -> Reg (#val, #symbol)
                 (src_op, Operand::Reg(d_reg)) if matches!(src_op, Operand::Immediate(_) | Operand::Symbol(_)) => {
                     let val = resolve_immediate(src_op, symbols)?;
                     let mut opcode: u16 = 0x4400; 
@@ -119,8 +115,6 @@ pub fn encode_instruction(
                     bytes.extend_from_slice(&opcode.to_le_bytes());
                     bytes.extend_from_slice(&(val as u16).to_le_bytes());
                 }
-
-                // Existing: Register -> Register (Rn, Rm)
                 (Operand::Reg(s_reg), Operand::Reg(d_reg)) => {
                     let mut opcode: u16 = 0x2000;
                     let s_val = encode_register(s_reg) as u16;
@@ -129,52 +123,64 @@ pub fn encode_instruction(
                     opcode |= d_val & 0x0F;
                     bytes.extend_from_slice(&opcode.to_le_bytes());
                 }
-
-                // NEW: Simple Register Indirect (*Rn -> Rm)
                 (Operand::Indirect(s_reg), Operand::Reg(d_reg)) => {
-                    let mut opcode: u16 = 0x2100; // Base opcode for indirect load
+                    let mut opcode: u16 = 0x2100;
                     let s_val = encode_register(s_reg) as u16;
                     let d_val = encode_register(d_reg) as u16;
                     opcode |= (s_val & 0x0F) << 4;
                     opcode |= d_val & 0x0F;
                     bytes.extend_from_slice(&opcode.to_le_bytes());
                 }
-
-                // NEW: Indirect Post-Increment (*Rn+ -> Rm)
                 (Operand::IndirectPostInc(s_reg), Operand::Reg(d_reg)) => {
-                    let mut opcode: u16 = 0x2200; // Base opcode for post-increment load
+                    let mut opcode: u16 = 0x2200;
                     let s_val = encode_register(s_reg) as u16;
                     let d_val = encode_register(d_reg) as u16;
                     opcode |= (s_val & 0x0F) << 4;
                     opcode |= d_val & 0x0F;
                     bytes.extend_from_slice(&opcode.to_le_bytes());
                 }
-
-                // NEW: Indirect Pre-Decrement (-*Rn -> Rm)
                 (Operand::IndirectPreDec(s_reg), Operand::Reg(d_reg)) => {
-                    let mut opcode: u16 = 0x2300; // Base opcode for pre-decrement load
+                    let mut opcode: u16 = 0x2300;
                     let s_val = encode_register(s_reg) as u16;
                     let d_val = encode_register(d_reg) as u16;
                     opcode |= (s_val & 0x0F) << 4;
                     opcode |= d_val & 0x0F;
                     bytes.extend_from_slice(&opcode.to_le_bytes());
                 }
-
-                // NEW: Direct Memory / Absolute (@label -> Rm)
                 (Operand::DirectMemory(label), Operand::Reg(d_reg)) => {
-                    // Resolve the label's address from your symbol table
                     let val = symbols.get(label).copied().ok_or_else(|| {
                         EncodeError::UndefinedSymbol(label.clone())
                     })?;
 
-                    let mut opcode: u16 = 0x4500; // Base opcode for direct memory load
+                    let mut opcode: u16 = 0x4500;
                     let d_val = encode_register(d_reg) as u16;
                     opcode |= d_val & 0x0F;
 
                     bytes.extend_from_slice(&opcode.to_le_bytes());
                     bytes.extend_from_slice(&(val as u16).to_le_bytes());
                 }
-
+                _ => return Err(EncodeError::UnsupportedInstruction),
+            }
+        }
+        ParsedInstruction::Movb { src, dst } => {
+            match (src, dst) {
+                (Operand::Indirect(s_reg), Operand::Reg(d_reg)) => {
+                    // TMS34010 MOVB indirect load base opcode (adjust if your ISA table differs)
+                    let mut opcode: u16 = 0x2500; 
+                    let s_val = encode_register(s_reg) as u16;
+                    let d_val = encode_register(d_reg) as u16;
+                    opcode |= (s_val & 0x0F) << 4;
+                    opcode |= d_val & 0x0F;
+                    bytes.extend_from_slice(&opcode.to_le_bytes());
+                }
+                (Operand::Reg(s_reg), Operand::Reg(d_reg)) => {
+                    let mut opcode: u16 = 0x2400; // Reg-to-reg byte move
+                    let s_val = encode_register(s_reg) as u16;
+                    let d_val = encode_register(d_reg) as u16;
+                    opcode |= (s_val & 0x0F) << 4;
+                    opcode |= d_val & 0x0F;
+                    bytes.extend_from_slice(&opcode.to_le_bytes());
+                }
                 _ => return Err(EncodeError::UnsupportedInstruction),
             }
         }
@@ -215,9 +221,17 @@ pub fn encode_instruction(
                 _ => return Err(EncodeError::UnsupportedInstruction),
             }
         }
-        ParsedInstruction::Sll { src, dst } | ParsedInstruction::Srl { src, dst } => {
-            let is_sll = matches!(instr, ParsedInstruction::Sll { .. });
-            let base_opcode = if is_sll { 0x3000 } else { 0x3200 };
+        ParsedInstruction::Sll { src, dst } 
+        | ParsedInstruction::Srl { src, dst }
+        | ParsedInstruction::Sla { src, dst }
+        | ParsedInstruction::Sra { src, dst } => {
+            let base_opcode = match instr {
+                ParsedInstruction::Sll { .. } => 0x3000,
+                ParsedInstruction::Srl { .. } => 0x3200,
+                ParsedInstruction::Sla { .. } => 0x3400,
+                ParsedInstruction::Sra { .. } => 0x3600,
+                _ => unreachable!(),
+            };
 
             match (src, dst) {
                 (src_op, Operand::Reg(d_reg)) if matches!(src_op, Operand::Immediate(_) | Operand::Symbol(_)) => {
@@ -243,12 +257,20 @@ pub fn encode_instruction(
                 EncodeError::UndefinedSymbol(target.clone())
             })?;
             
-            let current_pc = bytes.len() as u32;
-            let offset_bytes = target_addr as i32 - current_pc as i32;
-            let offset_words = (offset_bytes / 2) as i16;
+            let pc_next = current_addr + 2;
+            let offset_bytes = target_addr as i32 - pc_next as i32;
+            let word_offset = (offset_bytes / 2) as i16;
+
+            if word_offset < -128 || word_offset > 127 {
+                return Err(EncodeError::BranchOutOfRange {
+                    label: target.clone(),
+                    addr: current_addr,
+                    offset: word_offset as i32,
+                });
+            }
 
             let mut opcode: u16 = 0x6100;
-            opcode = (opcode & 0xFF00) | ((offset_words as u8) as u16);
+            opcode |= (word_offset as u16) & 0x00FF;
             bytes.extend_from_slice(&opcode.to_le_bytes());
         }
         ParsedInstruction::Jgt { target } => {
@@ -256,12 +278,20 @@ pub fn encode_instruction(
                 EncodeError::UndefinedSymbol(target.clone())
             })?;
             
-            let current_pc = bytes.len() as u32;
-            let offset_bytes = target_addr as i32 - current_pc as i32;
-            let offset_words = (offset_bytes / 2) as i16;
+            let pc_next = current_addr + 2;
+            let offset_bytes = target_addr as i32 - pc_next as i32;
+            let word_offset = (offset_bytes / 2) as i16;
+
+            if word_offset < -128 || word_offset > 127 {
+                return Err(EncodeError::BranchOutOfRange {
+                    label: target.clone(),
+                    addr: current_addr,
+                    offset: word_offset as i32,
+                });
+            }
 
             let mut opcode: u16 = 0x6200;
-            opcode = (opcode & 0xFF00) | ((offset_words as u8) as u16);
+            opcode |= (word_offset as u16) & 0x00FF;
             bytes.extend_from_slice(&opcode.to_le_bytes());
         }
         ParsedInstruction::Cmp { src, dst } => {
@@ -287,19 +317,24 @@ pub fn encode_instruction(
             }
         }
         ParsedInstruction::MacroDef { .. } | ParsedInstruction::MacroEnd => {
-            // Macro definitions do not emit bytes into the ROM binary
+            // Macro definitions generate no ROM bytes
         }
         ParsedInstruction::Jmp { target } => {
             let target_addr = resolve_immediate(target, symbols)?;
-            let current_pc = *symbols.get("__CURRENT_PC__").unwrap_or(&0);
-            let offset = ((target_addr as i32 - current_pc as i32) / 2) as i16;
+            let pc_next = current_addr + 2;
+            let offset_bytes = target_addr as i32 - pc_next as i32;
+            let word_offset = (offset_bytes / 2) as i16;
             
-            let opcode: u16 = 0x6F00;
+            let mut opcode: u16 = 0x6F00;
+            opcode |= (word_offset as u16) & 0x00FF;
             bytes.extend_from_slice(&opcode.to_le_bytes());
         }
         ParsedInstruction::Rets => {
             let opcode: u16 = 0x006F;
             bytes.extend_from_slice(&opcode.to_le_bytes());
+        }
+        ParsedInstruction::Trap { vector: _vector } => {
+            bytes.extend_from_slice(&0x0000u16.to_le_bytes());
         }
     }
 
