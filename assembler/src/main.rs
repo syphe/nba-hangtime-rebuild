@@ -234,6 +234,7 @@ impl Assembler {
                             // Lone label on its own line (e.g. "ALARM_TAB")
                             label_name_to_insert = first_word.to_string();
                             is_label = true;
+                            trimmed = &trimmed[first_word.len()..].trim();
                         } else {
                             // Colon-less label followed by a directive/macro on the same line
                             let second_word = parts[1];
