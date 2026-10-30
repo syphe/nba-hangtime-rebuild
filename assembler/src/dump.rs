@@ -36,6 +36,13 @@ fn fmt_operand(op: &Operand) -> String {
             };
             format!("*-{}", s)
         }
+        Operand::IndirectOffset(reg, offset) => {
+            let s = match reg {
+                Register::A(n) => format!("A{}", n),
+                Register::B(n) => format!("B{}", n),
+            };
+            format!("*{}({})", s, offset)
+        }
     }
 }
 
@@ -64,7 +71,8 @@ fn describe(instr: &ParsedInstruction) -> String {
         ParsedInstruction::Xor { src, dst } => format!("XOR {}, {}", fmt_operand(src), fmt_operand(dst)),
         ParsedInstruction::Jmp { target } => format!("JMP {}", fmt_operand(target)),
         ParsedInstruction::Rets => "RETS".to_string(),
-        ParsedInstruction::Usect { name, section, args } => format!(".usect {} {} {}", name, section, args.join(", "))  
+        ParsedInstruction::Usect { name, section, args } => format!(".usect {} {} {}", name, section, args.join(", ")),
+
     }
 }
 

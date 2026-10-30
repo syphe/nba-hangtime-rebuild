@@ -29,6 +29,7 @@ pub enum Operand {
     IndirectPostInc(Register),
     IndirectPreDec(Register),
     DirectMemory(String), 
+    IndirectOffset(Register, i32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -180,7 +181,10 @@ pub fn parse_operand(input: &str) -> IResult<&str, Operand> {
             |(_, _, reg)| Operand::IndirectPreDec(reg)
         ),
 
-        // 6. Simple Register Indirect: *A0
+        // 6. Indirect with Offset: *A0(16) -> Reference it here!
+        parse_indirect_offset,
+
+        // 7. Simple Register Indirect: *A0
         map(
             preceded(char('*'), parse_register),
             Operand::Indirect
@@ -623,3 +627,15 @@ pub fn parse_rets(input: &str) -> IResult<&str, ParsedInstruction> {
 //         },
 //     )(input)
 // }
+
+// Parses *reg(offset), e.g. *a0(16)
+fn parse_indirect_offset(input: &str) -> IResult<&str, Operand> {
+    let (input, _) = tag("*")(input)?;
+    let (input, reg) = parse_register(input)?; // Use your project's register parser
+    let (input, _) = tag("(")(input)?;
+    let (input, offset_str) = nom::bytes::complete::take_till(|c| c == ')')(input)?;
+    let (input, _) = tag(")")(input)?;
+    
+    let offset = offset_str.trim().parse::<i32>().unwrap_or(0);
+    Ok((input, Operand::IndirectOffset(reg, offset)))
+}

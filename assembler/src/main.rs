@@ -225,7 +225,7 @@ impl Assembler {
                     let first_word = parts[0];
                     let upper_first = first_word.to_uppercase();
                     
-                    let is_opcode = matches!(upper_first.as_str(), "MOVE" | "ADD" | "SUB" | "CMP" | "JMP" | "NOP" | "RETS" | "SLL" | "SRL" | "AND" | "OR" | "XOR" | "MOVI");
+                    let is_opcode = matches!(upper_first.as_str(), "MOVE" | "ADD" | "SUB" | "CMP" | "JMP" | "NOP" | "RETS" | "SLL" | "SRL" | "AND" | "OR" | "XOR" | "MOVI" | "JRZ" | "JRN");
                     let is_directive = first_word.starts_with('.');
                     let is_macro = self.macro_table.contains_key(&upper_first);
 
@@ -305,10 +305,10 @@ impl Assembler {
                 }
             }
 
-            // 9. Parse Instructions (NOP, MOVE, MOVI, etc.) with movi translation and size suffix stripping
+            // 9. Parse Instructions with move/movi/jrz/jrn translation and size suffix stripping
             let mut parser_trimmed = trimmed.to_string();
             let upper_pt = parser_trimmed.to_uppercase();
-            if (upper_pt.starts_with("MOVI") || upper_pt.starts_with("ADD") || upper_pt.starts_with("SUB")) 
+            if (upper_pt.starts_with("MOVE") || upper_pt.starts_with("MOVI") || upper_pt.starts_with("ADD") || upper_pt.starts_with("SUB")) 
                 && (parser_trimmed.ends_with(",L") || parser_trimmed.ends_with(",W") || parser_trimmed.ends_with(",l") || parser_trimmed.ends_with(",w")) 
             {
                 parser_trimmed = parser_trimmed[..parser_trimmed.len() - 2].trim().to_string();
@@ -318,6 +318,12 @@ impl Assembler {
             if upper_pt_2.starts_with("MOVI") {
                 let remainder = parser_trimmed[4..].trim();
                 parser_trimmed = format!("move\t#{}", remainder);
+            } else if upper_pt_2.starts_with("JRZ") {
+                let remainder = parser_trimmed[3..].trim();
+                parser_trimmed = format!("jeq\t{}", remainder);
+            } else if upper_pt_2.starts_with("JRN") {
+                let remainder = parser_trimmed[3..].trim();
+                parser_trimmed = format!("jlt\t{}", remainder);
             }
 
             match parser::parse_line(&parser_trimmed) {
@@ -335,10 +341,10 @@ impl Assembler {
                             if matches!(src, Operand::Immediate(_) | Operand::Symbol(_)) {
                                 extra_words += 1;
                             }
-                            if matches!(src, Operand::DirectMemory(_)) {
+                            if matches!(src, Operand::DirectMemory(_) | Operand::IndirectOffset { .. }) {
                                 extra_words += 1;
                             }
-                            if matches!(dst, Operand::DirectMemory(_)) {
+                            if matches!(dst, Operand::DirectMemory(_) | Operand::IndirectOffset { .. }) {
                                 extra_words += 1;
                             }
                             self.current_address += 2 + (extra_words * 2);
