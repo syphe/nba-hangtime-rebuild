@@ -264,6 +264,7 @@ pub fn parse_line(input: &str) -> IResult<&str, ParsedInstruction> {
             parse_jmp,
             parse_rets,
             // parse_usect,
+            parse_addi,
         )),
     ))(input)
 }
@@ -638,4 +639,20 @@ fn parse_indirect_offset(input: &str) -> IResult<&str, Operand> {
     
     let offset = offset_str.trim().parse::<i32>().unwrap_or(0);
     Ok((input, Operand::IndirectOffset(reg, offset)))
+}
+
+/// Parse ADDI instruction (e.g., "ADDI 96, A0" -> translates to Add with Immediate)
+pub fn parse_addi(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("ADDI")(input)?;
+    let (input, _) = multispace1(input)?;
+    
+    // Parse the value/symbol as an immediate (without requiring a leading #)
+    let (input, val) = parse_number(input)?;
+    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
+    let (input, dst) = parse_operand(input)?;
+
+    Ok((input, ParsedInstruction::Add { 
+        src: Operand::Immediate(val), 
+        dst 
+    }))
 }
