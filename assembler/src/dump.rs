@@ -52,7 +52,13 @@ fn describe(instr: &ParsedInstruction) -> String {
         ParsedInstruction::Label(l) => format!("{}:", l),
         ParsedInstruction::Equ { name, value } => format!(".equ {}, {}", name, value),
         ParsedInstruction::Directive { name, args } => format!("{} {}", name, args.join(", ")),
-        ParsedInstruction::Move { src, dst } => format!("MOVE {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::Move { src, dst, field } => {
+            if let Some(f) = field {
+                format!("MOVE {}, {}, {}", fmt_operand(src), fmt_operand(dst), fmt_operand(f))
+            } else {
+                format!("MOVE {}, {}", fmt_operand(src), fmt_operand(dst))
+            }
+        }
         ParsedInstruction::Add { src, dst } => format!("ADD {}, {}", fmt_operand(src), fmt_operand(dst)),
         ParsedInstruction::Sub { src, dst } => format!("SUB {}, {}", fmt_operand(src), fmt_operand(dst)),
         ParsedInstruction::Sll { src, dst } => format!("SLL {}, {}", fmt_operand(src), fmt_operand(dst)),
@@ -76,6 +82,12 @@ fn describe(instr: &ParsedInstruction) -> String {
         ParsedInstruction::Usect { name, section, args } => format!(".usect {} {} {}", name, section, args.join(", ")),
         ParsedInstruction::Trap { vector } => format!("TRAP {}", vector),
         ParsedInstruction::Movb { src, dst } => format!("MOVB {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::Dsjs { reg, target } => format!("DSJS {}, {}", fmt_operand(reg), target),
+        ParsedInstruction::Calla { target } => format!("CALLA {}", fmt_operand(target)),
+        ParsedInstruction::Btst { src, dst } => format!("BTST {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::Callr { label } => format!("CALLR {}", label),
+        ParsedInstruction::Movk { src, dst } => format!("MOVK {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::Xor { src, dst } => format!("XORI {}, {}", fmt_operand(src), fmt_operand(dst)),
     }
 }
 
@@ -147,29 +159,48 @@ pub fn verify(ast: &[ParsedInstruction], binary: &[u8], symbols: &SymbolTable) -
                     ),
                 ));
             }
-            ParsedInstruction::Move { src, dst }
-            | ParsedInstruction::Add { src, dst }
-            | ParsedInstruction::Sub { src, dst }
-            | ParsedInstruction::Sll { src, dst }
-            | ParsedInstruction::Srl { src, dst } => {
-                if matches!(src, Operand::Immediate(_) | Operand::Symbol(_)) {
-                    let expected = crate::encoder::resolve_immediate(src, symbols)?;
-                    let decoded = word(&slice[2..4]) as i32;
-                    results.push((
-                        decoded == expected,
-                        format!(
-                            "{} @ {:04X}: operand word {:04X} = {}, expected {}",
-                            describe(instr),
-                            addr,
-                            word(&slice[2..4]),
-                            decoded,
-                            expected
-                        ),
-                    ));
-                }
-                let _ = dst;
+            ParsedInstruction::Move { src, dst, field } => {
+            if matches!(src, Operand::Immediate(_) | Operand::Symbol(_)) {
+                let expected = crate::encoder::resolve_immediate(src, symbols)?;
+                // If a field specifier extension word is present, shift the immediate operand word offset
+                let offset = if field.is_some() { 4 } else { 2 };
+                let decoded = word(&slice[offset..offset + 2]) as i32;
+                results.push((
+                    decoded == expected,
+                    format!(
+                        "{} @ {:04X}: operand word {:04X} = {}, expected {}",
+                        describe(instr),
+                        addr,
+                        word(&slice[offset..offset + 2]),
+                        decoded,
+                        expected
+                    ),
+                ));
             }
-            ParsedInstruction::Directive { name, args } => {
+            let _ = (dst, field);
+        }
+        ParsedInstruction::Add { src, dst }
+        | ParsedInstruction::Sub { src, dst }
+        | ParsedInstruction::Sll { src, dst }
+        | ParsedInstruction::Srl { src, dst } => {
+            if matches!(src, Operand::Immediate(_) | Operand::Symbol(_)) {
+                let expected = crate::encoder::resolve_immediate(src, symbols)?;
+                let decoded = word(&slice[2..4]) as i32;
+                results.push((
+                    decoded == expected,
+                    format!(
+                        "{} @ {:04X}: operand word {:04X} = {}, expected {}",
+                        describe(instr),
+                        addr,
+                        word(&slice[2..4]),
+                        decoded,
+                        expected
+                    ),
+                ));
+            }
+            let _ = dst;
+        }
+        ParsedInstruction::Directive { name, args } => {
                 if name.eq_ignore_ascii_case(".WORD") {
                     for (i, arg) in args.iter().enumerate() {
                         let w = word(&slice[i * 2..i * 2 + 2]);

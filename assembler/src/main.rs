@@ -329,8 +329,23 @@ impl Assembler {
             match parser::parse_line(&parser_trimmed) {
                 Ok((_, instruction)) => {
                     match &instruction {
-                        Instruction::Move { src, dst } 
-                        | Instruction::Add { src, dst } 
+                        Instruction::Move { src, dst, field } => {
+                            let mut extra_words = 0;
+                            if matches!(src, Operand::Immediate(_) | Operand::Symbol(_)) {
+                                extra_words += 1;
+                            }
+                            if matches!(src, Operand::DirectMemory(_) | Operand::IndirectOffset { .. }) {
+                                extra_words += 1;
+                            }
+                            if matches!(dst, Operand::DirectMemory(_) | Operand::IndirectOffset { .. }) {
+                                extra_words += 1;
+                            }
+                            if field.is_some() {
+                                extra_words += 1;
+                            }
+                            self.current_address += 2 + (extra_words * 2);
+                        }
+                        Instruction::Add { src, dst } 
                         | Instruction::Sub { src, dst } 
                         | Instruction::Sll { src, dst } 
                         | Instruction::Srl { src, dst }

@@ -35,7 +35,7 @@ pub enum Operand {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParsedInstruction {
     Nop,
-    Move { src: Operand, dst: Operand },
+    Move { src: Operand, dst: Operand, field: Option<Operand> },
     Movb { src: Operand, dst: Operand },
     Add { src: Operand, dst: Operand },
     Sub { src: Operand, dst: Operand },
@@ -66,6 +66,11 @@ pub enum ParsedInstruction {
         args: Vec<String> 
     },
     Trap { vector: i32 },
+    Dsjs { reg: Operand, target: String },
+    Calla { target: Operand },
+    Btst { src: Operand, dst: Operand },
+    Callr { label: String },
+    Movk { src: Operand, dst: Operand },
 }
 
 #[derive(Clone, Debug)]
@@ -125,44 +130,33 @@ pub fn parse_immediate(input: &str) -> IResult<&str, Operand> {
     Ok((input, Operand::Immediate(val)))
 }
 
-// pub fn parse_operand(input: &str) -> IResult<&str, Operand> {
-//     alt((
-//         // Parse register (e.g., A0)
-//         map(parse_register, Operand::Reg),
-//         // Parse immediate with symbol support (e.g., #SCREEN_WIDTH or #384)
-//         map(
-//             preceded(
-//                 char('#'),
-//                 alt((
-//                     // Try parsing as a number first
-//                     map(parse_number, |n| Either::Left(n)),
-//                     // Otherwise parse as an alphanumeric symbol identifier
-//                     map(take_while1(|c: char| c.is_alphanumeric() || c == '_'), |s: &str| Either::Right(s.to_string())),
-//                 ))
-//             ),
-//             |val| match val {
-//                 Either::Left(n) => Operand::Immediate(n),
-//                 Either::Right(s) => Operand::Symbol(s),
-//             }
-//         ),
-//     ))(input)
-// }
-
 pub fn parse_operand(input: &str) -> IResult<&str, Operand> {
     alt((
         // 1. Direct Register: A0
         map(parse_register, Operand::Reg),
         
-        // 2. Immediate / Symbol: #384 or #SCREEN_WIDTH / #$0100
+        // 2. Comprehensive Immediate / Symbol: #384, #STACKL/32-32, #(VMUX_INITMODE|VMUX_MODE1), 0ffh, etc.
         map(
-            preceded(char('#'), take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '$' || c == '-')),
+            preceded(
+                opt(char('#')),
+                take_while1(|c: char| {
+                    c.is_alphanumeric() || c == '_' || c == '$' || c == '-' ||
+                    c == '/' || c == '(' || c == ')' || c == '|' || c == '&' || c == '+' ||
+                    c == ' ' || c == '\t' || c == 'h' || c == 'H'
+                })
+            ),
             |token: &str| {
-                if let Ok(n) = token.parse::<i32>() {
+                let token_trimmed = token.trim();
+                if let Ok(n) = token_trimmed.parse::<i32>() {
                     Operand::Immediate(n)
-                } else if let Some(hex) = token.strip_prefix('$') {
+                } else if let Some(hex) = token_trimmed.strip_prefix('$') {
+                    Operand::Immediate(i32::from_str_radix(hex, 16).unwrap_or(0))
+                } else if let Some(hex) = token_trimmed.strip_prefix("0x").or_else(|| token_trimmed.strip_prefix("0X")) {
+                    Operand::Immediate(i32::from_str_radix(hex, 16).unwrap_or(0))
+                } else if let Some(hex) = token_trimmed.strip_suffix('h').or_else(|| token_trimmed.strip_suffix('H')) {
                     Operand::Immediate(i32::from_str_radix(hex, 16).unwrap_or(0))
                 } else {
-                    Operand::Symbol(token.to_string())
+                    Operand::Symbol(token_trimmed.to_string())
                 }
             }
         ),
@@ -173,46 +167,25 @@ pub fn parse_operand(input: &str) -> IResult<&str, Operand> {
             |s: &str| Operand::DirectMemory(s.to_string())
         ),
 
-        // 4. Indirect Post-Increment: *A0+
-        map(
-            tuple((char('*'), parse_register, char('+'))),
-            |(_, reg, _)| Operand::IndirectPostInc(reg)
-        ),
-
-        // 5. Indirect Pre-Decrement: -*A0
+        // 4. Indirect Pre-Decrement: -*A0 (must be before simple indirect)
         map(
             tuple((char('-'), char('*'), parse_register)),
             |(_, _, reg)| Operand::IndirectPreDec(reg)
         ),
 
-        // 6. Indirect with Offset: *A0(16) -> Reference it here!
+        // 5. Indirect Post-Increment: *A0+
+        map(
+            tuple((char('*'), parse_register, char('+'))),
+            |(_, reg, _)| Operand::IndirectPostInc(reg)
+        ),
+
+        // 6. Indirect with Offset: *A0(16)
         parse_indirect_offset,
 
         // 7. Simple Register Indirect: *A0
         map(
             preceded(char('*'), parse_register),
             Operand::Indirect
-        ),
-        // 2. Immediate / Symbol: #384, #SCREEN_WIDTH, or complex expressions like #(VMUX_INITMODE|VMUX_MODE1)
-        map(
-            preceded(
-                char('#'),
-                take_while1(|c: char| {
-                    c.is_alphanumeric() || c == '_' || c == '$' || c == '-' ||
-                    c == '(' || c == ')' || c == '|' || c == '&' || c == '+' ||
-                    c == ' ' || c == '\t'
-                })
-            ),
-            |token: &str| {
-                let token_trimmed = token.trim();
-                if let Ok(n) = token_trimmed.parse::<i32>() {
-                    Operand::Immediate(n)
-                } else if let Some(hex) = token_trimmed.strip_prefix('$') {
-                    Operand::Immediate(i32::from_str_radix(hex, 16).unwrap_or(0))
-                } else {
-                    Operand::Symbol(token_trimmed.to_string())
-                }
-            }
         ),
     ))(input)
 }
@@ -223,19 +196,23 @@ pub fn parse_nop(input: &str) -> IResult<&str, ParsedInstruction> {
     Ok((input, ParsedInstruction::Nop))
 }
 
-/// Parse the MOVE instruction (e.g., "MOVE A0, A1")
+/// Parse MOVE instruction with optional field specifier (e.g., "MOVE A0, -*SP, 1")
 pub fn parse_move(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = tag_no_case("MOVE")(input)?;
     let (input, _) = multispace1(input)?;
+    let (input, src) = alt((parse_legacy_immediate, parse_operand))(input)?;
+    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
+    let (input, dst) = parse_operand(input)?;
     
-    // Parse source and destination separated by a comma and optional whitespace
-    let (input, (src, dst)) = separated_pair(
-        parse_operand,
+    // Optional third argument for field size/width (e.g., ",1")
+    let (input, field) = opt(tuple((
         delimited(multispace0, char(','), multispace0),
-        parse_operand,
-    )(input)?;
+        parse_legacy_immediate,
+    )))(input)?;
 
-    Ok((input, ParsedInstruction::Move { src, dst }))
+    let field_op = field.map(|(_, f)| f);
+
+    Ok((input, ParsedInstruction::Move { src, dst, field: field_op }))
 }
 
 /// Helper to clean comments and whitespace from a line before parsing
@@ -276,6 +253,8 @@ pub fn parse_line(input: &str) -> IResult<&str, ParsedInstruction> {
             parse_shift,
             parse_equ,
             parse_movb,
+            parse_andi,
+            parse_dsjs,
         )),
         alt((
             parse_cmp,
@@ -299,6 +278,13 @@ pub fn parse_line(input: &str) -> IResult<&str, ParsedInstruction> {
             parse_preprocessor_line,
             parse_trap,
         )),
+        alt((
+            parse_calla,
+            parse_btst,
+            parse_callr,
+            parse_movk,
+            parse_xori,
+        ))
     ))(input)
 }
 
@@ -767,35 +753,19 @@ pub fn parse_clr(input: &str) -> IResult<&str, ParsedInstruction> {
 
     Ok((input, ParsedInstruction::Move { 
         src: Operand::Immediate(0), 
-        dst 
+        dst, field: None
     }))
 }
 
-/// Parse MOVI instruction (supports complex expressions like "MOVI (VMUX_INITMODE|VMUX_MODE1), A0")
+/// Parse MOVI instruction (e.g., "MOVI STACKL/32-32, A2")
 pub fn parse_movi(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = tag_no_case("MOVI")(input)?;
     let (input, _) = multispace1(input)?;
-    
-    // Parse source as a symbol/expression token allowing parentheses, operators, etc.
-    let (input, expr_str) = take_while1(|c: char| {
-        c.is_alphanumeric() || c == '_' || c == '$' || c == '-' || 
-        c == '(' || c == ')' || c == '|' || c == '&' || c == '+' || 
-        c == ' ' || c == '\t'
-    })(input)?;
-
-    let expr_trimmed = expr_str.trim();
-    let src = if let Ok(n) = expr_trimmed.parse::<i32>() {
-        Operand::Immediate(n)
-    } else if let Some(hex) = expr_trimmed.strip_prefix('$') {
-        Operand::Immediate(i32::from_str_radix(hex, 16).unwrap_or(0))
-    } else {
-        Operand::Symbol(expr_trimmed.to_string())
-    };
-
+    let (input, src) = parse_legacy_immediate(input)?;
     let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
     let (input, dst) = parse_operand(input)?;
 
-    Ok((input, ParsedInstruction::Move { src, dst }))
+    Ok((input, ParsedInstruction::Move { src, dst, field: None }))
 }
 
 /// Parse CALLI instruction (e.g., "CALLI map_ok" -> translates to Call with immediate/symbol target)
@@ -829,4 +799,90 @@ pub fn parse_movb(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
     let (input, dst) = parse_operand(input)?;
     Ok((input, ParsedInstruction::Movb { src, dst }))
+}
+
+pub fn parse_legacy_immediate(input: &str) -> IResult<&str, Operand> {
+    let (input, _) = opt(char('#'))(input)?;
+    let (input, token) = take_while1(|c: char| {
+        c.is_alphanumeric() || c == '_' || c == '$' || c == '-' || 
+        c == '/' || c == '(' || c == ')' || c == '|' || c == '&' || c == '+'
+    })(input)?;
+
+    let trimmed = token.trim();
+    // Return as Symbol/Expression string so the encoder/resolver can evaluate it
+    Ok((input, Operand::Symbol(trimmed.to_string())))
+}
+
+/// Parse ANDI instruction (e.g., "ANDI 0ffh, A4")
+pub fn parse_andi(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("ANDI")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, src) = parse_legacy_immediate(input)?;
+    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
+    let (input, dst) = parse_operand(input)?;
+
+    Ok((input, ParsedInstruction::And { src, dst }))
+}
+
+/// Parse DSJS / DSJ instruction (e.g., "DSJS A2, SFC_iloop" or "DSJS A0, $")
+pub fn parse_dsjs(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = alt((tag_no_case("DSJS"), tag_no_case("DSJ")))(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, reg) = parse_operand(input)?;
+    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
+    // Allow alphanumeric characters, underscores, $, and .
+    let (input, target) = take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '$' || c == '.')(input)?;
+
+    Ok((input, ParsedInstruction::Dsjs { reg, target: target.to_string() }))
+}
+
+/// Parse CALLA instruction (e.g., "CALLA InitAddresses" or absolute expressions)
+pub fn parse_calla(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("CALLA")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, target) = parse_legacy_immediate(input)?;
+
+    Ok((input, ParsedInstruction::Calla { target }))
+}
+
+/// Parse BTST instruction (e.g., "BTST 12, A0" or "#12, A0")
+pub fn parse_btst(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("BTST")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, src) = parse_legacy_immediate(input)?;
+    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
+    let (input, dst) = parse_operand(input)?;
+
+    Ok((input, ParsedInstruction::Btst { src, dst }))
+}
+
+/// Parse CALLR instruction (e.g., "CALLR io_init")
+pub fn parse_callr(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("CALLR")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, label) = take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.')(input)?;
+
+    Ok((input, ParsedInstruction::Callr { label: label.to_string() }))
+}
+
+/// Parse MOVK instruction (e.g., "MOVK INAMODE, A0")
+pub fn parse_movk(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("MOVK")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, src) = parse_legacy_immediate(input)?;
+    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
+    let (input, dst) = parse_operand(input)?;
+
+    Ok((input, ParsedInstruction::Movk { src, dst }))
+}
+
+/// Parse XORI instruction (e.g., "XORI 02000h, A0")
+pub fn parse_xori(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("XORI")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, src) = parse_legacy_immediate(input)?;
+    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
+    let (input, dst) = parse_operand(input)?;
+
+    Ok((input, ParsedInstruction::Xor { src, dst }))
 }
