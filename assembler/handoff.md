@@ -52,7 +52,7 @@ A modern, native Rust assembler designed for the TMS34010 arcade graphics proces
 - Object generation now has a linker-development mode (`--object-format` / `build.ps1 -ObjectFormat`) that emits JSON objects with embedded machine code, per-section payloads, symbols, branch/call fixups including section-local offsets. A regenerated clean object sweep produced all 51 JSON objects.
 - The first native experimental linker (`link.py`) now places text/data sections, applies short control-flow fixups, rejects unresolved relocations, and is invoked by `build.ps1 -ObjectFormat` in Makefile module order.
 - `MMTM` label-on-instruction support was added so inline labels such as `ADJ_BOX MMTM ...` enter the symbol table.
-- Full-module linking remains active next work. The integrated validation now reaches the linker and reports unresolved labels; the next implementation pass is to improve bare-label/case handling and complete cross-module symbol metadata for those references.
+- Full-module linking remains active next work. The linker now uses legacy module-order `.text`/`.data` placement and skips non-ROM fixup sections safely. Full-object validation reaches unresolved-symbol reporting; the remaining pass is to distinguish real cross-module exports from assembler false positives, repair missing label metadata, and support non-short relocation encodings.
 - The earlier standalone COFF-extraction experiment was removed because its section-offset assumptions were not reliable; legacy `BB.OUT` remains a reference only.
 
 ## 6. Next Steps

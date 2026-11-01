@@ -40,53 +40,35 @@ def main():
     objects = load_objects(args.objects)
     text_cursor = ROM_BASE
     symbols = {}
-    unresolved_definitions = []
     placements = []
 
-    # The linker places text first, followed by data, in .cmd module order.
-    for path, obj in objects:
-        for section in obj.get("sections", []):
-            if section_name(section["name"]) == "text":
-                text_cursor += len(base64.b64decode(section["data"]))
+    text_size = sum(
+        len(base64.b64decode(section["data"]))
+        for _, obj in objects
+        for section in obj.get("sections", [])
+        if section_name(section["name"]) == "text"
+    )
+    data_cursor = ROM_BASE + text_size
 
-    data_cursor = text_cursor
     for path, obj in objects:
         section_addresses = {}
-        text_address = 0
-        data_address = 0
         for section in obj.get("sections", []):
             name = section_name(section["name"])
             data = base64.b64decode(section["data"])
             if name == "text":
-                address = section_addresses.get("text", 0)
-                if not address:
-                    address = ROM_BASE
-                    for earlier_path, earlier_obj, earlier_addresses in placements:
-                        if earlier_addresses.get("text"):
-                            earlier_section = next(
-                                (item for item in earlier_obj["sections"] if section_name(item["name"]) == "text"),
-                                None,
-                            )
-                            if earlier_section:
-                                address += len(base64.b64decode(earlier_section["data"]))
-                text_address = address
+                section_addresses[name] = text_cursor
+                text_cursor += len(data)
             elif name == "data":
-                address = data_cursor
-                data_address = address
+                section_addresses[name] = data_cursor
                 data_cursor += len(data)
             else:
-                address = 0
-            section_addresses[name] = address
+                section_addresses[name] = 0
 
         placements.append((path, obj, section_addresses))
         for symbol in obj.get("symbols", []):
             section = section_name(symbol.get("section", "")) if symbol.get("section") else ""
-            if section == "text":
-                symbols[symbol["name"].lower()] = text_address + symbol.get("section_offset", 0)
-            elif section == "data":
-                symbols[symbol["name"].lower()] = data_address + symbol.get("section_offset", 0)
-            elif symbol.get("address", 0) != 0:
-                unresolved_definitions.append((path, symbol["name"]))
+            if section in section_addresses:
+                symbols[symbol["name"].lower()] = section_addresses[section] + symbol.get("section_offset", 0)
 
     rom = bytearray([FILL]) * ROM_LENGTH
 
@@ -111,7 +93,7 @@ def main():
         section_addresses = addresses
         for fixup in obj.get("fixups", []):
             section = section_name(fixup["section"])
-            if section not in section_addresses:
+            if section not in ("text", "data") or section not in section_addresses:
                 continue
             if fixup["symbol"].lower() not in symbols:
                 unresolved_fixups.append((path, fixup["symbol"]))
