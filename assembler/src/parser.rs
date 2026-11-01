@@ -156,6 +156,7 @@ pub fn parse_operand(input: &str) -> IResult<&str, Operand> {
         // Indirect operands must precede the general symbol parser because '*' is
         // also permitted in immediate expressions.
         map(tuple((char('-'), char('*'), parse_register)), |(_, _, reg)| Operand::IndirectPreDec(reg)),
+        map(tuple((char('*'), char('-'), parse_register)), |(_, _, reg)| Operand::IndirectPreDec(reg)),
         map(tuple((char('*'), parse_register, char('+'))), |(_, reg, _)| Operand::IndirectPostInc(reg)),
         parse_indirect_offset,
         map(preceded(char('*'), parse_register), Operand::Indirect),
@@ -492,7 +493,7 @@ pub fn parse_equ(input: &str) -> IResult<&str, ParsedInstruction> {
     map(
         tuple((
             // 1. Symbol name
-            take_while1(|c: char| c.is_alphanumeric() || c == '_'),
+            take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '#'),
             space1, 
             // 2. Directive: .equ or equ
             alt((

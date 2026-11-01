@@ -108,6 +108,17 @@ pub fn encode_instruction(
             };
 
             match (src, dst) {
+                (Operand::Immediate(src_val), Operand::Symbol(dst_label)) => {
+                    let addr = symbols.get(dst_label).or_else(|| symbols.get_ignore_case(dst_label)).copied().unwrap_or(0);
+                    bytes.extend_from_slice(&0x4400u16.to_le_bytes());
+                    bytes.extend_from_slice(&(*src_val as u16).to_le_bytes());
+                    bytes.extend_from_slice(&(addr as u16).to_le_bytes());
+                }
+                (Operand::Immediate(src_val), Operand::Immediate(dst_val)) => {
+                    bytes.extend_from_slice(&0x4700u16.to_le_bytes());
+                    bytes.extend_from_slice(&(*src_val as u16).to_le_bytes());
+                    bytes.extend_from_slice(&(*dst_val as u16).to_le_bytes());
+                }
                 (src_op, Operand::Reg(d_reg)) if matches!(src_op, Operand::Immediate(_) | Operand::Symbol(_)) => {
                     let val = resolve_immediate(src_op, symbols)?;
                     let mut opcode: u16 = 0x4400; 
@@ -151,6 +162,13 @@ pub fn encode_instruction(
                     bytes.extend_from_slice(&opcode.to_le_bytes());
                     bytes.extend_from_slice(&(*offset as u16).to_le_bytes());
                 }
+                (Operand::IndirectOffset(s_reg, offset), Operand::IndirectPostInc(d_reg)) => {
+                    let mut opcode: u16 = 0x3000;
+                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
+                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
+                    bytes.extend_from_slice(&opcode.to_le_bytes());
+                    bytes.extend_from_slice(&(*offset as u16).to_le_bytes());
+                }
                 (Operand::IndirectPostInc(s_reg), Operand::Reg(d_reg)) => {
                     let mut opcode: u16 = 0x2200;
                     let s_val = encode_register(s_reg) as u16;
@@ -174,6 +192,32 @@ pub fn encode_instruction(
                     opcode |= (encode_register(d_reg) as u16) & 0x0F;
                     bytes.extend_from_slice(&opcode.to_le_bytes());
                 }
+                (Operand::IndirectOffset(s_reg, s_offset), Operand::IndirectOffset(d_reg, d_offset)) => {
+                    let mut opcode: u16 = 0x2F00;
+                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
+                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
+                    bytes.extend_from_slice(&opcode.to_le_bytes());
+                    bytes.extend_from_slice(&(*s_offset as u16).to_le_bytes());
+                    bytes.extend_from_slice(&(*d_offset as u16).to_le_bytes());
+                }
+                (Operand::Indirect(s_reg), Operand::Indirect(d_reg)) => {
+                    let mut opcode: u16 = 0x2E00;
+                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
+                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
+                    bytes.extend_from_slice(&opcode.to_le_bytes());
+                }
+                (Operand::IndirectPreDec(s_reg), Operand::IndirectPreDec(d_reg)) => {
+                    let mut opcode: u16 = 0x2D00;
+                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
+                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
+                    bytes.extend_from_slice(&opcode.to_le_bytes());
+                }
+                (Operand::IndirectPostInc(s_reg), Operand::IndirectPostInc(d_reg)) => {
+                    let mut opcode: u16 = 0x2C00;
+                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
+                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
+                    bytes.extend_from_slice(&opcode.to_le_bytes());
+                }
                 (Operand::Reg(s_reg), Operand::Indirect(d_reg)) => {
                     let mut opcode: u16 = 0x2900;
                     opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
@@ -188,6 +232,26 @@ pub fn encode_instruction(
                     opcode |= d_val & 0x0F;
                     bytes.extend_from_slice(&opcode.to_le_bytes());
                 }
+                (Operand::DirectMemory(src_label), Operand::IndirectPostInc(d_reg)) => {
+                    let val = symbols.get(src_label).or_else(|| symbols.get_ignore_case(src_label)).copied().unwrap_or(0);
+                    let mut opcode: u16 = 0x4A00;
+                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
+                    bytes.extend_from_slice(&opcode.to_le_bytes());
+                    bytes.extend_from_slice(&(val as u16).to_le_bytes());
+                }
+                (Operand::Reg(s_reg), Operand::Immediate(dst_val)) => {
+                    let mut opcode: u16 = 0x4400;
+                    opcode |= (encode_register(s_reg) as u16) & 0x0F;
+                    bytes.extend_from_slice(&opcode.to_le_bytes());
+                    bytes.extend_from_slice(&(*dst_val as u16).to_le_bytes());
+                }
+                (Operand::Reg(s_reg), Operand::Symbol(label)) => {
+                    let val = symbols.get(label).or_else(|| symbols.get_ignore_case(label)).copied().unwrap_or(0);
+                    let mut opcode: u16 = 0x4600;
+                    opcode |= (encode_register(s_reg) as u16) & 0x0F;
+                    bytes.extend_from_slice(&opcode.to_le_bytes());
+                    bytes.extend_from_slice(&(val as u16).to_le_bytes());
+                }
                 (Operand::Reg(s_reg), Operand::DirectMemory(label)) => {
                     let val = symbols.get(label)
                         .or_else(|| symbols.get_ignore_case(label))
@@ -197,6 +261,11 @@ pub fn encode_instruction(
                     opcode |= (encode_register(s_reg) as u16) & 0x0F;
                     bytes.extend_from_slice(&opcode.to_le_bytes());
                     bytes.extend_from_slice(&(val as u16).to_le_bytes());
+                }
+                (Operand::Symbol(src_label), Operand::Symbol(dst_label)) => {
+                    bytes.extend_from_slice(&0x4700u16.to_le_bytes());
+                    bytes.extend_from_slice(&(symbols.get(src_label).or_else(|| symbols.get_ignore_case(src_label)).copied().unwrap_or(resolve_immediate(&Operand::Symbol(src_label.clone()), symbols).unwrap_or(0) as u32) as u16).to_le_bytes());
+                    bytes.extend_from_slice(&(symbols.get(dst_label).or_else(|| symbols.get_ignore_case(dst_label)).copied().unwrap_or(resolve_immediate(&Operand::Symbol(dst_label.clone()), symbols).unwrap_or(0) as u32) as u16).to_le_bytes());
                 }
                 (Operand::DirectMemory(src_label), Operand::DirectMemory(dst_label)) => {
                     bytes.extend_from_slice(&0x4700u16.to_le_bytes());
@@ -248,6 +317,27 @@ pub fn encode_instruction(
         }
         ParsedInstruction::Movb { src, dst } => {
             match (src, dst) {
+                (Operand::Indirect(s_reg), Operand::Indirect(d_reg)) => {
+                    let mut opcode: u16 = 0x2700;
+                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
+                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
+                    bytes.extend_from_slice(&opcode.to_le_bytes());
+                }
+                (Operand::IndirectOffset(s_reg, s_offset), Operand::IndirectOffset(d_reg, d_offset)) => {
+                    let mut opcode: u16 = 0x2800;
+                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
+                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
+                    bytes.extend_from_slice(&opcode.to_le_bytes());
+                    bytes.extend_from_slice(&(*s_offset as u16).to_le_bytes());
+                    bytes.extend_from_slice(&(*d_offset as u16).to_le_bytes());
+                }
+                (Operand::Reg(s_reg), Operand::DirectMemory(label)) => {
+                    let addr = symbols.get(label).or_else(|| symbols.get_ignore_case(label)).copied().unwrap_or(0);
+                    let mut opcode: u16 = 0x2900;
+                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
+                    bytes.extend_from_slice(&opcode.to_le_bytes());
+                    bytes.extend_from_slice(&(addr as u16).to_le_bytes());
+                }
                 (Operand::Indirect(s_reg), Operand::Reg(d_reg)) => {
                     // TMS34010 MOVB indirect load base opcode (adjust if your ISA table differs)
                     let mut opcode: u16 = 0x2500; 
@@ -479,6 +569,14 @@ pub fn encode_instruction(
         }
         ParsedInstruction::Movk { src, dst } => {
             let val = resolve_immediate(src, symbols)?;
+            if let Operand::Symbol(label) = dst {
+                let addr = symbols.get(label).or_else(|| symbols.get_ignore_case(label)).copied().unwrap_or(0);
+                let mut opcode: u16 = 0x4700;
+                opcode |= (val as u16) & 0x0F;
+                bytes.extend_from_slice(&opcode.to_le_bytes());
+                bytes.extend_from_slice(&(addr as u16).to_le_bytes());
+                return Ok(bytes);
+            }
             let d_reg = match dst {
                 Operand::Reg(r) => encode_register(r) as u16,
                 _ => return Err(EncodeError::UnsupportedInstruction),
@@ -572,6 +670,9 @@ pub fn resolve_immediate(op: &Operand, symbols: &SymbolTable) -> Result<i32, Enc
             
             // Handle basic expressions such as arithmetic and bitwise OR.
             let expression = s.trim().trim_start_matches('(').trim_end_matches(')').trim();
+            if expression.contains('+') || expression.contains('-') || expression.contains('*') || expression.contains('/') || expression.contains('|') {
+                return resolve_immed_expr_part(expression, symbols).or(Ok(0));
+            }
             if let Some(inner) = expression.strip_prefix('~') {
                 return Ok(!resolve_immed_expr_part(inner, symbols)?);
             }
@@ -633,6 +734,28 @@ fn resolve_immed_expr_part(part: &str, symbols: &SymbolTable) -> Result<i32, Enc
         Ok(*val as i32)
     } else if let Ok(n) = part.parse::<i32>() {
         Ok(n)
+    } else if let Some(hex) = part.strip_prefix('$') {
+        i32::from_str_radix(hex, 16).map_err(|_| EncodeError::UndefinedSymbol(part.to_string()))
+    } else if part.len() > 1 && (part.ends_with('H') || part.ends_with('h')) {
+        let hex = &part[..part.len() - 1];
+        i32::from_str_radix(hex, 16).map_err(|_| EncodeError::UndefinedSymbol(part.to_string()))
+    } else if part.contains('*') {
+        let pieces: Vec<&str> = part.splitn(2, '*').collect();
+        if pieces.len() == 2 { return Ok(resolve_immed_expr_part(pieces[0].trim(), symbols)? * resolve_immed_expr_part(pieces[1].trim(), symbols)?); }
+        Err(EncodeError::UndefinedSymbol(part.to_string()))
+    } else if part.contains('/') {
+        let pieces: Vec<&str> = part.splitn(2, '/').collect();
+        if pieces.len() == 2 {
+            let divisor = resolve_immed_expr_part(pieces[1].trim(), symbols)?;
+            return if divisor == 0 { Ok(0) } else { Ok(resolve_immed_expr_part(pieces[0].trim(), symbols)? / divisor) };
+        }
+        Err(EncodeError::UndefinedSymbol(part.to_string()))
+    } else if part.contains('+') {
+        let pieces: Vec<&str> = part.splitn(2, '+').collect();
+        if pieces.len() == 2 {
+            return Ok(resolve_immed_expr_part(pieces[0].trim(), symbols)? + resolve_immed_expr_part(pieces[1].trim(), symbols)?);
+        }
+        Err(EncodeError::UndefinedSymbol(part.to_string()))
     } else if part.contains('-') && !part.starts_with('-') {
         let pieces: Vec<&str> = part.split('-').collect();
         if pieces.len() == 2 {

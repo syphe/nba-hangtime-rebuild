@@ -90,6 +90,57 @@ struct ConditionalFrame {
 }
 
 impl Assembler {
+    fn eval_condition(&self, expression: &str) -> i32 {
+        let expression = expression.split(';').next().unwrap_or(expression).trim();
+        if let Some((left, right)) = expression.split_once("&&") {
+            return (self.eval_condition(left) != 0 && self.eval_condition(right) != 0) as i32;
+        }
+        if let Some((left, right)) = expression.split_once("||") {
+            return (self.eval_condition(left) != 0 || self.eval_condition(right) != 0) as i32;
+        }
+        for op in [">=", "<=", "==", "!=", ">", "<", "="] {
+            if let Some((left, right)) = expression.split_once(op) {
+                let a = self.eval_arithmetic(left.trim());
+                let b = self.eval_arithmetic(right.trim());
+                return match op {
+                    ">=" => a >= b,
+                    "<=" => a <= b,
+                    "==" | "=" => a == b,
+                    "!=" => a != b,
+                    ">" => a > b,
+                    "<" => a < b,
+                    _ => false,
+                } as i32;
+            }
+        }
+        self.eval_arithmetic(expression)
+    }
+
+    fn eval_arithmetic(&self, expression: &str) -> i32 {
+        let expression = expression.trim().trim_matches(|c| c == '(' || c == ')').trim();
+        if expression.is_empty() { return 0; }
+        if let Some(hex) = expression.strip_prefix('$') {
+            return i32::from_str_radix(hex, 16).unwrap_or(0);
+        }
+        if let Some(hex) = expression.strip_prefix("0x").or_else(|| expression.strip_prefix("0X")) {
+            return i32::from_str_radix(hex, 16).unwrap_or(0);
+        }
+        if let Some((left, right)) = expression.split_once('+') {
+            return self.eval_arithmetic(left.trim()) + self.eval_arithmetic(right.trim());
+        }
+        if let Some((left, right)) = expression.split_once('-') {
+            return self.eval_arithmetic(left.trim()) - self.eval_arithmetic(right.trim());
+        }
+        if let Some((left, right)) = expression.split_once('|') {
+            return self.eval_arithmetic(left.trim()) | self.eval_arithmetic(right.trim());
+        }
+        if let Some((left, right)) = expression.split_once('&') {
+            return self.eval_arithmetic(left.trim()) & self.eval_arithmetic(right.trim());
+        }
+        if let Ok(value) = expression.parse::<i32>() { return value; }
+        self.symbol_table.get_ignore_case(expression).copied().unwrap_or(0) as i32
+    }
+
     pub fn new() -> Self {
         Self {
             symbol_table: SymbolTable::default(),
@@ -105,6 +156,7 @@ impl Assembler {
 
         let mut line_queue: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
         let mut idx = 0;
+        let mut conditionals: Vec<ConditionalFrame> = Vec::new();
 
         self.macro_table.entry("JAUC".to_string()).or_insert(MacroTemplate {
             name: "JAUC".to_string(),
@@ -117,8 +169,36 @@ impl Assembler {
             idx += 1;
 
             let clean_line = parser::sanitize_line(&raw_line);
-            let mut trimmed = clean_line.trim();
+            let mut trimmed_owned = clean_line.trim().to_string();
+            if let Some(colon_pos) = trimmed_owned.find(':') {
+                let rest = trimmed_owned[colon_pos + 1..].trim_start();
+                if rest.to_uppercase().starts_with("EQU") {
+                    trimmed_owned.replace_range(colon_pos..colon_pos + 1, " ");
+                }
+            }
+            let mut trimmed = trimmed_owned.as_str();
             let upper_trimmed = trimmed.to_uppercase();
+
+            let conditional_directive = upper_trimmed.split_whitespace().next().unwrap_or("");
+            if conditional_directive == ".IF" || conditional_directive == ".ELSE" || conditional_directive == ".ENDIF" {
+                let parent_active = conditionals.iter().all(|frame| frame.branch_taken);
+                if conditional_directive == ".IF" {
+                    let expression = trimmed.splitn(2, char::is_whitespace).nth(1).unwrap_or("0");
+                    let active = parent_active && self.eval_condition(expression) != 0;
+                    conditionals.push(ConditionalFrame { parent_active, branch_taken: active });
+                } else if conditional_directive == ".ELSE" {
+                    if let Some(frame) = conditionals.last_mut() {
+                        frame.branch_taken = frame.parent_active && !frame.branch_taken;
+                    }
+                } else {
+                    conditionals.pop();
+                }
+                continue;
+            }
+
+            if !conditionals.iter().all(|frame| frame.branch_taken) {
+                continue;
+            }
 
             // 1a. Check for Single-Line Macros
             if upper_trimmed.contains(".MACRO") && upper_trimmed.contains(".ENDM") {
@@ -172,7 +252,7 @@ impl Assembler {
             let line_num = idx; // approximate
 
             // 4. Check for .equ Equates FIRST (before labels)
-            if upper_trimmed.contains(".EQU") {
+            if upper_trimmed.contains(".EQU") || upper_trimmed.split_whitespace().nth(1).is_some_and(|word| word.eq_ignore_ascii_case("EQU")) {
                 match parser::parse_equ(trimmed) {
                     Ok((_, Instruction::Equ { name, value })) => {
                         self.symbol_table.insert(name.clone(), value as u32);
@@ -247,8 +327,12 @@ impl Assembler {
                     let is_directive = first_word.starts_with('.');
                     let is_macro = self.macro_table.contains_key(&upper_first);
 
-                    if !is_opcode && !is_directive && !is_macro && first_word.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    if !is_opcode && !is_directive && !is_macro && first_word.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$') {
                         if parts.len() == 1 {
+                            label_name_to_insert = first_word.to_string();
+                            is_label = true;
+                            trimmed = &trimmed[first_word.len()..].trim();
+                        } else if first_word.starts_with('$') {
                             label_name_to_insert = first_word.to_string();
                             is_label = true;
                             trimmed = &trimmed[first_word.len()..].trim();
@@ -477,7 +561,8 @@ impl Assembler {
 
 /// Recursively loads a source file and expands any .include directives
 pub fn load_source_file(path: &Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let content = fs::read_to_string(path)?;
+    let bytes = fs::read(path)?;
+    let content = String::from_utf8_lossy(&bytes);
     let mut resolved_lines = Vec::new();
     let base_dir = path.parent().unwrap_or(Path::new("."));
 
@@ -506,13 +591,12 @@ pub fn load_source_file(path: &Path) -> Result<Vec<String>, Box<dyn std::error::
 
 /// Helper to extract text inside double quotes (e.g., "hardware.asm")
 fn extract_quoted_filename(line: &str) -> Option<String> {
-    let start = line.find('"')?;
-    let end = line.rfind('"')?;
-    if start < end {
-        Some(line[start + 1..end].to_string())
-    } else {
-        None
+    if let (Some(start), Some(end)) = (line.find('"'), line.rfind('"')) {
+        if start < end { return Some(line[start + 1..end].to_string()); }
     }
+    let (_, filename) = line.split_once(char::is_whitespace)?;
+    let filename = filename.trim().split_whitespace().next()?.trim_matches('"');
+    (!filename.is_empty()).then(|| filename.to_string())
 }
 
 fn main() -> Result<(), AsmError> {
