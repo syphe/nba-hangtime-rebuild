@@ -225,7 +225,12 @@ impl Assembler {
                     let first_word = parts[0];
                     let upper_first = first_word.to_uppercase();
                     
-                    let is_opcode = matches!(upper_first.as_str(), "MOVE" | "ADD" | "SUB" | "CMP" | "JMP" | "NOP" | "RETS" | "SLL" | "SRL" | "AND" | "OR" | "XOR" | "MOVI" | "JRZ" | "JRN" | "SETF");
+                    let is_opcode = matches!(upper_first.as_str(),
+                        "MOVE" | "MOVB" | "MOVK" | "ADDI" | "ADDK" | "SUB" | "SUBK" |
+                        "CMP" | "CMPI" | "JMP" | "NOP" | "RETS" | "SLL" | "SRL" | "SLA" | "SRA" |
+                        "AND" | "ANDI" | "OR" | "XOR" | "XORI" | "MOVI" | "JR" | "JRUC" |
+                        "JRZ" | "JRN" | "JRNZ" | "JEQ" | "JNE" | "JLT" | "JGT" | "CALL" | "CALLA" |
+                        "CALLR" | "CALLI" | "BTST" | "CLR" | "PIXT" | "DSJ" | "DSJS" | "SETF" | "EXGPC" | "TRAP");
                     let is_directive = first_word.starts_with('.');
                     let is_macro = self.macro_table.contains_key(&upper_first);
 
@@ -236,7 +241,14 @@ impl Assembler {
                             trimmed = &trimmed[first_word.len()..].trim();
                         } else {
                             let second_word = parts[1];
-                            if second_word.starts_with('.') || self.macro_table.contains_key(&second_word.to_uppercase()) {
+                            let upper_second = second_word.to_uppercase();
+                            let second_is_opcode = matches!(upper_second.as_str(),
+                                "MOVE" | "MOVB" | "MOVK" | "ADDI" | "ADDK" | "SUB" | "SUBK" |
+                                "CMP" | "CMPI" | "JMP" | "NOP" | "RETS" | "SLL" | "SRL" | "SLA" | "SRA" |
+                                "AND" | "ANDI" | "OR" | "XOR" | "XORI" | "MOVI" | "JR" | "JRUC" |
+                                "JRZ" | "JRN" | "JRNZ" | "JEQ" | "JNE" | "JLT" | "JGT" | "CALL" | "CALLA" |
+                                "CALLR" | "CALLI" | "BTST" | "CLR" | "PIXT" | "DSJ" | "DSJS" | "SETF" | "EXGPC" | "TRAP");
+                            if second_word.starts_with('.') || second_is_opcode || self.macro_table.contains_key(&upper_second) {
                                 label_name_to_insert = first_word.to_string();
                                 is_label = true;
                                 trimmed = trimmed[first_word.len()..].trim();

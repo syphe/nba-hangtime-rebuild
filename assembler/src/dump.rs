@@ -88,6 +88,7 @@ fn describe(instr: &ParsedInstruction) -> String {
         ParsedInstruction::Rets => "RETS".to_string(),
         ParsedInstruction::Usect { name, section, args } => format!(".usect {} {} {}", name, section, args.join(", ")),
         ParsedInstruction::Trap { vector } => format!("TRAP {}", vector),
+        ParsedInstruction::Not { dst } => format!("NOT {}", fmt_operand(dst)),
         ParsedInstruction::Movb { src, dst } => format!("MOVB {}, {}", fmt_operand(src), fmt_operand(dst)),
         ParsedInstruction::Pixt { src, dst } => format!("PIXT {}, {}", fmt_operand(src), fmt_operand(dst)),
         ParsedInstruction::Dsjs { reg, target } => format!("DSJS {}, {}", fmt_operand(reg), target),

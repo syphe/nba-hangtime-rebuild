@@ -74,6 +74,7 @@ pub enum ParsedInstruction {
     Movk { src: Operand, dst: Operand },
     Exgpc(Register),
     Setf { size: Operand, sign: Operand, offset: Operand },
+    Not { dst: Operand },
     Pixt { src: Operand, dst: Operand },
 }
 
@@ -296,6 +297,7 @@ pub fn parse_line(input: &str) -> IResult<&str, ParsedInstruction> {
             parse_xori,
             parse_exgpc,
             parse_setf,
+            parse_not,
             parse_pixt,
         ))
     ))(input)
@@ -792,8 +794,16 @@ pub fn parse_movi(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, src) = parse_legacy_immediate(input)?;
     let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
     let (input, dst) = parse_operand(input)?;
+    let (input, field) = opt(tuple((
+        delimited(multispace0, char(','), multispace0),
+        parse_legacy_immediate,
+    )))(input)?;
 
-    Ok((input, ParsedInstruction::Move { src, dst, field: None }))
+    Ok((input, ParsedInstruction::Move {
+        src,
+        dst,
+        field: field.map(|(_, field)| field),
+    }))
 }
 
 /// Parse CALLI instruction (e.g., "CALLI map_ok" -> translates to Call with immediate/symbol target)
@@ -817,6 +827,14 @@ pub fn parse_trap(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = multispace1(input)?;
     let (input, vector) = parse_number(input)?;
     Ok((input, ParsedInstruction::Trap { vector }))
+}
+
+/// Parse NOT instruction (one operand), which complements the destination register.
+pub fn parse_not(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("NOT")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, dst) = parse_operand(input)?;
+    Ok((input, ParsedInstruction::Not { dst }))
 }
 
 /// Parse PIXT instruction, including pixel-field address modifiers such as *A0.XY.
@@ -859,10 +877,18 @@ pub fn parse_movb(input: &str) -> IResult<&str, ParsedInstruction> {
 
 pub fn parse_legacy_immediate(input: &str) -> IResult<&str, Operand> {
     let (input, _) = opt(char('#'))(input)?;
+
+    if input.starts_with('[') {
+        if let Some(end) = input.find(']') {
+            let coordinate = &input[..=end];
+            return Ok((&input[end + 1..], Operand::Immediate(parse_number_literal(coordinate))));
+        }
+    }
+
     let (input, token) = take_while1(|c: char| {
         c.is_alphanumeric() || c == '_' || c == '$' || c == '-' ||
-        c == '/' || c == '*' || c == '(' || c == ')' || c == '|' || c == '&' || c == '+' ||
-        c == ' ' || c == '\t' || c == 'h' || c == 'H'
+        c == '/' || c == '*' || c == '(' || c == ')' ||
+        c == '|' || c == '&' || c == '+' || c == ' ' || c == '\t' || c == 'h' || c == 'H'
     })(input)?;
 
     let token_trimmed = token.trim();

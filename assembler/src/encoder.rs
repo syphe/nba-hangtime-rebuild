@@ -183,6 +183,15 @@ pub fn encode_instruction(
                 bytes.extend_from_slice(&(fv as u16).to_le_bytes());
             }
         }
+        ParsedInstruction::Not { dst } => {
+            if let Operand::Reg(reg) = dst {
+                let mut opcode: u16 = 0x2F00;
+                opcode |= (encode_register(reg) as u16) & 0x1F;
+                bytes.extend_from_slice(&opcode.to_le_bytes());
+            } else {
+                return Err(EncodeError::UnsupportedInstruction);
+            }
+        }
         ParsedInstruction::Pixt { .. } => {
             bytes.extend_from_slice(&0x0000u16.to_le_bytes());
         }
