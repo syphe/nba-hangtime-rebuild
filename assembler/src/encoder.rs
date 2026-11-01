@@ -440,6 +440,31 @@ pub fn encode_instruction(
             bytes.extend_from_slice(&opcode.to_le_bytes());
             bytes.extend_from_slice(&(val as u16).to_le_bytes());
         }
+        ParsedInstruction::Exgpc(reg) => {
+            let reg_val = encode_register(reg) as u16;
+            let mut opcode: u16 = 0x0120;
+            opcode |= reg_val & 0x1F;
+            bytes.extend_from_slice(&opcode.to_le_bytes());
+        }
+        ParsedInstruction::Setf { size, sign, offset } => {
+            let size_val = resolve_immediate(size, symbols)?;
+            let sign_val = resolve_immediate(sign, symbols)?;
+            let offset_val = resolve_immediate(offset, symbols)?;
+
+            // Base opcode for SETF
+            bytes.extend_from_slice(&0x0040u16.to_le_bytes());
+
+            // Extension word: packs size (lower bits / field configuration), sign, offset
+            // Typically: bits [0:4] = field size (0 = 32), bit 5 = sign extend, bits [6:10] = offset
+            let mut ext: u16 = 0;
+            ext |= (size_val as u16) & 0x1F;
+            if sign_val != 0 {
+                ext |= 0x0020;
+            }
+            ext |= ((offset_val as u16) & 0x1F) << 6;
+
+            bytes.extend_from_slice(&ext.to_le_bytes());
+        }
     }
 
     Ok(bytes)

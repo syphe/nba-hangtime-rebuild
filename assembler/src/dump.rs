@@ -88,6 +88,19 @@ fn describe(instr: &ParsedInstruction) -> String {
         ParsedInstruction::Callr { label } => format!("CALLR {}", label),
         ParsedInstruction::Movk { src, dst } => format!("MOVK {}, {}", fmt_operand(src), fmt_operand(dst)),
         ParsedInstruction::Xor { src, dst } => format!("XORI {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::Exgpc(reg) => {
+            let reg_str = match reg {
+                Register::A(n) => format!("A{}", n),
+                Register::B(n) => format!("B{}", n),
+            };
+            format!("EXGPC {}", reg_str)
+        }
+        ParsedInstruction::Setf { size, sign, offset } => format!(
+            "SETF {}, {}, {}", 
+            fmt_operand(size), 
+            fmt_operand(sign), 
+            fmt_operand(offset)
+        ),
     }
 }
 

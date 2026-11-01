@@ -225,7 +225,7 @@ impl Assembler {
                     let first_word = parts[0];
                     let upper_first = first_word.to_uppercase();
                     
-                    let is_opcode = matches!(upper_first.as_str(), "MOVE" | "ADD" | "SUB" | "CMP" | "JMP" | "NOP" | "RETS" | "SLL" | "SRL" | "AND" | "OR" | "XOR" | "MOVI" | "JRZ" | "JRN");
+                    let is_opcode = matches!(upper_first.as_str(), "MOVE" | "ADD" | "SUB" | "CMP" | "JMP" | "NOP" | "RETS" | "SLL" | "SRL" | "AND" | "OR" | "XOR" | "MOVI" | "JRZ" | "JRN" | "SETF");
                     let is_directive = first_word.starts_with('.');
                     let is_macro = self.macro_table.contains_key(&upper_first);
 
@@ -316,7 +316,7 @@ impl Assembler {
 
             let upper_pt_2 = parser_trimmed.to_uppercase();
             if upper_pt_2.starts_with("MOVI") {
-                let remainder = parser_trimmed[4..].trim();
+                let remainder = parser_trimmed[4..].trim().trim_start_matches('#').trim();
                 parser_trimmed = format!("move\t#{}", remainder);
             } else if upper_pt_2.starts_with("JRZ") {
                 let remainder = parser_trimmed[3..].trim();
@@ -371,6 +371,9 @@ impl Assembler {
                             } else {
                                 self.current_address += 2;
                             }
+                        }
+                        Instruction::Setf { .. } => {
+                            self.current_address += 4; // Base opcode + 16-bit extension word
                         }
                         Instruction::Jlt { .. } 
                         | Instruction::Jgt { .. } 

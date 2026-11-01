@@ -71,6 +71,8 @@ pub enum ParsedInstruction {
     Btst { src: Operand, dst: Operand },
     Callr { label: String },
     Movk { src: Operand, dst: Operand },
+    Exgpc(Register),
+    Setf { size: Operand, sign: Operand, offset: Operand },
 }
 
 #[derive(Clone, Debug)]
@@ -82,22 +84,27 @@ pub struct MacroTemplate {
 
 // --- PARSERS ---
 
-/// Parse a register like A0-A15 or B0-B15 (case-insensitive)
 pub fn parse_register(input: &str) -> IResult<&str, Register> {
-    let (input, bank) = satisfy(|c| c == 'a' || c == 'A' || c == 'b' || c == 'B')(input)?;
-    let (input, num) = parse_u32(input)?;
-
-    if num > 15 {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Verify,
-        )));
-    }
-
-    let reg = match bank.to_ascii_lowercase() {
-        'a' => Register::A(num as u8),
-        'b' => Register::B(num as u8),
-        _ => unreachable!(),
+    let (input, reg_str) = take_while1(|c: char| c.is_alphanumeric())(input)?;
+    let upper = reg_str.to_uppercase();
+    
+    let reg = match upper.as_str() {
+        "SP" => Register::A(15),
+        _ if upper.starts_with('A') => {
+            if let Ok(n) = upper[1..].parse::<u8>() {
+                if n <= 15 { Register::A(n) } else { return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))); }
+            } else {
+                return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+            }
+        }
+        _ if upper.starts_with('B') => {
+            if let Ok(n) = upper[1..].parse::<u8>() {
+                if n <= 15 { Register::B(n) } else { return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))); }
+            } else {
+                return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+            }
+        }
+        _ => return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))),
     };
 
     Ok((input, reg))
@@ -135,13 +142,13 @@ pub fn parse_operand(input: &str) -> IResult<&str, Operand> {
         // 1. Direct Register: A0
         map(parse_register, Operand::Reg),
         
-        // 2. Comprehensive Immediate / Symbol: #384, #STACKL/32-32, #(VMUX_INITMODE|VMUX_MODE1), 0ffh, etc.
+        // 2. Comprehensive Immediate / Symbol: #384, #510*01000H, #STACKL/32-32, etc.
         map(
             preceded(
                 opt(char('#')),
                 take_while1(|c: char| {
                     c.is_alphanumeric() || c == '_' || c == '$' || c == '-' ||
-                    c == '/' || c == '(' || c == ')' || c == '|' || c == '&' || c == '+' ||
+                    c == '/' || c == '*' || c == '(' || c == ')' || c == '|' || c == '&' || c == '+' ||
                     c == ' ' || c == '\t' || c == 'h' || c == 'H'
                 })
             ),
@@ -284,6 +291,8 @@ pub fn parse_line(input: &str) -> IResult<&str, ParsedInstruction> {
             parse_callr,
             parse_movk,
             parse_xori,
+            parse_exgpc,
+            parse_setf,
         ))
     ))(input)
 }
@@ -804,13 +813,25 @@ pub fn parse_movb(input: &str) -> IResult<&str, ParsedInstruction> {
 pub fn parse_legacy_immediate(input: &str) -> IResult<&str, Operand> {
     let (input, _) = opt(char('#'))(input)?;
     let (input, token) = take_while1(|c: char| {
-        c.is_alphanumeric() || c == '_' || c == '$' || c == '-' || 
-        c == '/' || c == '(' || c == ')' || c == '|' || c == '&' || c == '+'
+        c.is_alphanumeric() || c == '_' || c == '$' || c == '-' ||
+        c == '/' || c == '*' || c == '(' || c == ')' || c == '|' || c == '&' || c == '+' ||
+        c == ' ' || c == '\t' || c == 'h' || c == 'H'
     })(input)?;
 
-    let trimmed = token.trim();
-    // Return as Symbol/Expression string so the encoder/resolver can evaluate it
-    Ok((input, Operand::Symbol(trimmed.to_string())))
+    let token_trimmed = token.trim();
+    let operand = if let Ok(n) = token_trimmed.parse::<i32>() {
+        Operand::Immediate(n)
+    } else if let Some(hex) = token_trimmed.strip_prefix('$') {
+        Operand::Immediate(i32::from_str_radix(hex, 16).unwrap_or(0))
+    } else if let Some(hex) = token_trimmed.strip_prefix("0x").or_else(|| token_trimmed.strip_prefix("0X")) {
+        Operand::Immediate(i32::from_str_radix(hex, 16).unwrap_or(0))
+    } else if let Some(hex) = token_trimmed.strip_suffix('h').or_else(|| token_trimmed.strip_suffix('H')) {
+        Operand::Immediate(i32::from_str_radix(hex, 16).unwrap_or(0))
+    } else {
+        Operand::Symbol(token_trimmed.to_string())
+    };
+
+    Ok((input, operand))
 }
 
 /// Parse ANDI instruction (e.g., "ANDI 0ffh, A4")
@@ -885,4 +906,26 @@ pub fn parse_xori(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, dst) = parse_operand(input)?;
 
     Ok((input, ParsedInstruction::Xor { src, dst }))
+}
+
+/// Parse EXGPC instruction (e.g., "EXGPC B6")
+pub fn parse_exgpc(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("EXGPC")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, reg) = parse_register(input)?;
+
+    Ok((input, ParsedInstruction::Exgpc(reg)))
+}
+
+/// Parse SETF instruction (e.g., "SETF 16, 1, 0")
+pub fn parse_setf(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("SETF")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, size) = parse_legacy_immediate(input)?;
+    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
+    let (input, sign) = parse_legacy_immediate(input)?;
+    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
+    let (input, offset) = parse_legacy_immediate(input)?;
+
+    Ok((input, ParsedInstruction::Setf { size, sign, offset }))
 }
