@@ -232,6 +232,21 @@ pub fn encode_instruction(
                     opcode |= d_val & 0x0F;
                     bytes.extend_from_slice(&opcode.to_le_bytes());
                 }
+                (Operand::Symbol(src_label), Operand::DirectMemory(dst_label)) => {
+                    let src = symbols.get(src_label).or_else(|| symbols.get_ignore_case(src_label)).copied().unwrap_or(0);
+                    let dst = symbols.get(dst_label).or_else(|| symbols.get_ignore_case(dst_label)).copied().unwrap_or(0);
+                    bytes.extend_from_slice(&0x4700u16.to_le_bytes());
+                    bytes.extend_from_slice(&(src as u16).to_le_bytes());
+                    bytes.extend_from_slice(&(dst as u16).to_le_bytes());
+                }
+                (Operand::DirectMemory(src_label), Operand::Symbol(dst_label)) => {
+                    let src = symbols.get(src_label).or_else(|| symbols.get_ignore_case(src_label)).copied().unwrap_or(0);
+                    let dst_name = dst_label.trim_start_matches('*').trim_end_matches('+');
+                    let dst = symbols.get(dst_name).or_else(|| symbols.get_ignore_case(dst_name)).copied().unwrap_or(0);
+                    bytes.extend_from_slice(&0x4700u16.to_le_bytes());
+                    bytes.extend_from_slice(&(src as u16).to_le_bytes());
+                    bytes.extend_from_slice(&(dst as u16).to_le_bytes());
+                }
                 (Operand::DirectMemory(src_label), Operand::IndirectPostInc(d_reg)) => {
                     let val = symbols.get(src_label).or_else(|| symbols.get_ignore_case(src_label)).copied().unwrap_or(0);
                     let mut opcode: u16 = 0x4A00;

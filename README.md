@@ -35,6 +35,17 @@ python3 build.py
 #    ROM/      — program ROMs (u54/u63, 512 KB each) + ROM_MINE.bin (1 MB)
 ```
 
+## Modern assembler
+
+The Rust TMS34010 assembler mirrors the source-object list in `SRC/MAKEFILE`. From Windows PowerShell, build every listed module with:
+
+```powershell
+cd assembler
+.\build.ps1
+```
+
+Objects are written to `assembler/build/*.OBJ`. Use `-Clean` to remove and rebuild all objects, or `-ShowVerbose` to show assembler symbol and pass output.
+
 ## MAME
 
 After building, you need to update your MAME ROM set (`nbamht.zip`) with:
