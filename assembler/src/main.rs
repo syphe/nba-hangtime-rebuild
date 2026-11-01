@@ -226,11 +226,11 @@ impl Assembler {
                     let upper_first = first_word.to_uppercase();
                     
                     let is_opcode = matches!(upper_first.as_str(),
-                        "MOVE" | "MOVB" | "MOVK" | "ADDI" | "ADDK" | "SUB" | "SUBK" |
+                        "MOVE" | "MOVB" | "INC" | "DEC" | "MOVK" | "MOVX" | "MOVY" | "RL" | "RR" | "ADDI" | "ADDK" | "SUB" | "SUBK" |
                         "CMP" | "CMPI" | "JMP" | "NOP" | "RETS" | "SLL" | "SRL" | "SLA" | "SRA" |
-                        "AND" | "ANDI" | "OR" | "XOR" | "XORI" | "MOVI" | "JR" | "JRUC" |
+                        "AND" | "ANDN" | "ANDI" | "OR" | "ORI" | "XOR" | "XORI" | "MOVI" | "JR" | "JRUC" | "JREQ" | "JRNE" | "JRNZ" | "JRZ" | "JRC" | "JRNC" | "JRLT" | "JRGT" | "JRHS" | "JRLO" |
                         "JRZ" | "JRN" | "JRNZ" | "JEQ" | "JNE" | "JLT" | "JGT" | "CALL" | "CALLA" |
-                        "CALLR" | "CALLI" | "BTST" | "CLR" | "PIXT" | "DSJ" | "DSJS" | "SETF" | "EXGPC" | "TRAP");
+                        "CALLR" | "CALLI" | "BTST" | "CLR" | "PIXT" | "FILL" | "NOT" | "DSJ" | "DSJS" | "SETF" | "MMFM" | "EXGPC" | "TRAP");
                     let is_directive = first_word.starts_with('.');
                     let is_macro = self.macro_table.contains_key(&upper_first);
 
@@ -243,11 +243,11 @@ impl Assembler {
                             let second_word = parts[1];
                             let upper_second = second_word.to_uppercase();
                             let second_is_opcode = matches!(upper_second.as_str(),
-                                "MOVE" | "MOVB" | "MOVK" | "ADDI" | "ADDK" | "SUB" | "SUBK" |
+                                "MOVE" | "MOVB" | "INC" | "DEC" | "MOVK" | "MOVX" | "MOVY" | "RL" | "RR" | "ADDI" | "ADDK" | "SUB" | "SUBK" |
                                 "CMP" | "CMPI" | "JMP" | "NOP" | "RETS" | "SLL" | "SRL" | "SLA" | "SRA" |
-                                "AND" | "ANDI" | "OR" | "XOR" | "XORI" | "MOVI" | "JR" | "JRUC" |
+                                "AND" | "ANDN" | "ANDI" | "OR" | "ORI" | "XOR" | "XORI" | "MOVI" | "JR" | "JRUC" | "JREQ" | "JRNE" | "JRNZ" | "JRZ" | "JRC" | "JRNC" | "JRLT" | "JRGT" | "JRHS" | "JRLO" |
                                 "JRZ" | "JRN" | "JRNZ" | "JEQ" | "JNE" | "JLT" | "JGT" | "CALL" | "CALLA" |
-                                "CALLR" | "CALLI" | "BTST" | "CLR" | "PIXT" | "DSJ" | "DSJS" | "SETF" | "EXGPC" | "TRAP");
+                                "CALLR" | "CALLI" | "BTST" | "CLR" | "PIXT" | "FILL" | "NOT" | "DSJ" | "DSJS" | "SETF" | "MMFM" | "EXGPC" | "TRAP");
                             if second_word.starts_with('.') || second_is_opcode || self.macro_table.contains_key(&upper_second) {
                                 label_name_to_insert = first_word.to_string();
                                 is_label = true;

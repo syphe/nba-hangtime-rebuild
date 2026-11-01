@@ -183,6 +183,16 @@ pub fn encode_instruction(
                 bytes.extend_from_slice(&(fv as u16).to_le_bytes());
             }
         }
+        ParsedInstruction::Inc { .. }
+        | ParsedInstruction::Dec { .. }
+        | ParsedInstruction::Andn { .. }
+        | ParsedInstruction::Movy { .. }
+        | ParsedInstruction::Movx { .. }
+        | ParsedInstruction::RotateLeft { .. }
+        | ParsedInstruction::RotateRight { .. }
+        | ParsedInstruction::Fill { .. } => {
+            bytes.extend_from_slice(&0x0000u16.to_le_bytes());
+        }
         ParsedInstruction::Not { dst } => {
             if let Operand::Reg(reg) = dst {
                 let mut opcode: u16 = 0x2F00;
@@ -507,6 +517,11 @@ pub fn resolve_immediate(op: &Operand, symbols: &SymbolTable) -> Result<i32, Enc
             // Check if it's a direct symbol lookup first and cast to i32
             if let Some(&val) = symbols.get(s) {
                 return Ok(val as i32);
+            }
+            if let Some(inner) = s.strip_prefix('~') {
+                if let Some(&val) = symbols.get(inner) {
+                    return Ok(!(val as i32));
+                }
             }
             if let Ok(n) = s.parse::<i32>() {
                 return Ok(n);

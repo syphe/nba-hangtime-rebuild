@@ -36,6 +36,12 @@ pub enum Operand {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParsedInstruction {
     Nop,
+    Inc { dst: Operand },
+    Dec { dst: Operand },
+    Movy { src: Operand, dst: Operand },
+    Movx { src: Operand, dst: Operand },
+    RotateLeft { src: Operand, dst: Operand },
+    RotateRight { src: Operand, dst: Operand },
     Move { src: Operand, dst: Operand, field: Option<Operand> },
     Movb { src: Operand, dst: Operand },
     Add { src: Operand, dst: Operand },
@@ -57,6 +63,7 @@ pub enum ParsedInstruction {
     MacroDef { name: String, params: Vec<String> },
     MacroEnd, // for .endm
     And { src: Operand, dst: Operand },
+    Andn { src: Operand, dst: Operand },
     Or  { src: Operand, dst: Operand },
     Xor { src: Operand, dst: Operand },
     Jmp { target: Operand },
@@ -75,6 +82,7 @@ pub enum ParsedInstruction {
     Exgpc(Register),
     Setf { size: Operand, sign: Operand, offset: Operand },
     Not { dst: Operand },
+    Fill { field: String },
     Pixt { src: Operand, dst: Operand },
 }
 
@@ -151,7 +159,7 @@ pub fn parse_operand(input: &str) -> IResult<&str, Operand> {
                 opt(char('#')),
                 take_while1(|c: char| {
                     c.is_alphanumeric() || c == '_' || c == '$' || c == '-' ||
-                    c == '/' || c == '*' || c == '(' || c == ')' || c == '|' || c == '&' || c == '+' ||
+                    c == '/' || c == '*' || c == '(' || c == ')' || c == '|' || c == '&' || c == '+' || c == '~' ||
                     c == ' ' || c == '\t' || c == 'h' || c == 'H'
                 })
             ),
@@ -198,6 +206,17 @@ pub fn parse_operand(input: &str) -> IResult<&str, Operand> {
             Operand::Indirect
         ),
     ))(input)
+}
+
+pub fn parse_inc_dec(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, mnemonic) = alt((tag_no_case("INC"), tag_no_case("DEC")))(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, dst) = parse_operand(input)?;
+    if mnemonic.eq_ignore_ascii_case("INC") {
+        Ok((input, ParsedInstruction::Inc { dst }))
+    } else {
+        Ok((input, ParsedInstruction::Dec { dst }))
+    }
 }
 
 /// Parse the NOP instruction
@@ -251,11 +270,14 @@ pub fn parse_line(input: &str) -> IResult<&str, ParsedInstruction> {
     alt((
         alt((
             parse_nop,
+            parse_inc_dec,
             parse_move,
             parse_add,
             parse_sub,
             parse_jr,
+            parse_relative_conditional,
             parse_call,
+            parse_jahs,
             parse_jeq,
             parse_jne,
             parse_directive,
@@ -264,6 +286,7 @@ pub fn parse_line(input: &str) -> IResult<&str, ParsedInstruction> {
             parse_equ,
             parse_movb,
             parse_andi,
+            parse_ori,
             parse_dsjs,
         )),
         alt((
@@ -274,6 +297,7 @@ pub fn parse_line(input: &str) -> IResult<&str, ParsedInstruction> {
             parse_macro_def,
             parse_macro_end,
             parse_and,
+            parse_andn,
             parse_or,
             parse_xor,
             parse_jmp,
@@ -298,6 +322,10 @@ pub fn parse_line(input: &str) -> IResult<&str, ParsedInstruction> {
             parse_exgpc,
             parse_setf,
             parse_not,
+            parse_coordinate_move,
+            parse_rotate,
+            parse_mmfm,
+            parse_fill,
             parse_pixt,
         ))
     ))(input)
@@ -319,6 +347,16 @@ pub fn parse_jr(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, label) = parse_identifier(input)?; 
     Ok((input, ParsedInstruction::Jr { label: label.to_string() }))
 }
+pub fn parse_relative_conditional(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, mnemonic) = parse_identifier(input)?;
+    if !mnemonic.to_ascii_uppercase().starts_with("JR") {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+    }
+    let (input, _) = multispace1(input)?;
+    let (input, label) = parse_identifier(input)?;
+    Ok((input, ParsedInstruction::Jr { label: label.to_string() }))
+}
+
 /// Parse a CALL instruction (e.g., "CALL SUBROUTINE")
 pub fn parse_call(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = tag_no_case("CALL")(input)?;
@@ -349,6 +387,14 @@ pub fn parse_sub(input: &str) -> IResult<&str, ParsedInstruction> {
         parse_operand,
     )(input)?;
     Ok((input, ParsedInstruction::Sub { src, dst }))
+}
+
+/// Parse absolute conditional JAHS (Jump if all halfwords high sign) instruction.
+pub fn parse_jahs(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("JAHS")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, label) = parse_identifier(input)?;
+    Ok((input, ParsedInstruction::Jr { label: label.to_string() }))
 }
 
 /// Parse JEQ (Jump if Equal) instruction
@@ -605,6 +651,11 @@ pub fn parse_and(input: &str) -> IResult<&str, ParsedInstruction> {
     )(input)
 }
 
+pub fn parse_andn(input: &str) -> IResult<&str, ParsedInstruction> {
+    map(tuple((tag_no_case("ANDN"), space1, parse_operand, space0, tag(","), space0, parse_operand)),
+        |(_, _, src, _, _, _, dst)| ParsedInstruction::Andn { src, dst })(input)
+}
+
 pub fn parse_or(input: &str) -> IResult<&str, ParsedInstruction> {
     map(
         tuple((
@@ -765,14 +816,11 @@ pub fn parse_cmpi(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = multispace1(input)?;
     
     // Parse immediate number value
-    let (input, val) = parse_number(input)?;
+    let (input, src) = alt((parse_legacy_immediate, map(parse_number, Operand::Immediate)))(input)?;
     let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
     let (input, dst) = parse_operand(input)?;
 
-    Ok((input, ParsedInstruction::Cmp { 
-        src: Operand::Immediate(val), 
-        dst 
-    }))
+    Ok((input, ParsedInstruction::Cmp { src, dst }))
 }
 
 /// Parse CLR instruction (e.g., "CLR A0" -> translates to MOVE #0, A0)
@@ -827,6 +875,52 @@ pub fn parse_trap(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = multispace1(input)?;
     let (input, vector) = parse_number(input)?;
     Ok((input, ParsedInstruction::Trap { vector }))
+}
+
+pub fn parse_mmfm(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("MMFM")(input)?;
+    let (input, _) = take_while(|c: char| c != '\n' && c != '\r')(input)?;
+    Ok((input, ParsedInstruction::Directive {
+        name: "MMFM".to_string(),
+        args: Vec::new(),
+    }))
+}
+
+pub fn parse_coordinate_move(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, mnemonic) = alt((tag_no_case("MOVY"), tag_no_case("MOVX")))(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, src) = parse_operand(input)?;
+    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
+    let (input, dst) = parse_operand(input)?;
+    let instruction = if mnemonic.eq_ignore_ascii_case("MOVY") {
+        ParsedInstruction::Movy { src, dst }
+    } else {
+        ParsedInstruction::Movx { src, dst }
+    };
+    Ok((input, instruction))
+}
+
+pub fn parse_rotate(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, mnemonic) = alt((tag_no_case("RL"), tag_no_case("RR")))(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, src) = parse_operand(input)?;
+    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
+    let (input, dst) = parse_operand(input)?;
+    let instruction = if mnemonic.eq_ignore_ascii_case("RL") {
+        ParsedInstruction::RotateLeft { src, dst }
+    } else {
+        ParsedInstruction::RotateRight { src, dst }
+    };
+    Ok((input, instruction))
+}
+
+/// Parse FILL instruction and its optional field selector.
+pub fn parse_fill(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("FILL")(input)?;
+    let (input, field) = opt(preceded(multispace1, parse_identifier))(input)?;
+    Ok((input, ParsedInstruction::Fill {
+        field: field.unwrap_or("").to_string(),
+    }))
 }
 
 /// Parse NOT instruction (one operand), which complements the destination register.
@@ -888,7 +982,7 @@ pub fn parse_legacy_immediate(input: &str) -> IResult<&str, Operand> {
     let (input, token) = take_while1(|c: char| {
         c.is_alphanumeric() || c == '_' || c == '$' || c == '-' ||
         c == '/' || c == '*' || c == '(' || c == ')' ||
-        c == '|' || c == '&' || c == '+' || c == ' ' || c == '\t' || c == 'h' || c == 'H'
+        c == '|' || c == '&' || c == '+' || c == '~' || c == ' ' || c == '\t' || c == 'h' || c == 'H'
     })(input)?;
 
     let token_trimmed = token.trim();
@@ -905,6 +999,16 @@ pub fn parse_legacy_immediate(input: &str) -> IResult<&str, Operand> {
     };
 
     Ok((input, operand))
+}
+
+/// Parse ORI instruction.
+pub fn parse_ori(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("ORI")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, src) = parse_legacy_immediate(input)?;
+    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
+    let (input, dst) = parse_operand(input)?;
+    Ok((input, ParsedInstruction::Or { src, dst }))
 }
 
 /// Parse ANDI instruction (e.g., "ANDI 0ffh, A4")

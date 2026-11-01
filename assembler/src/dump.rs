@@ -56,6 +56,12 @@ fn fmt_operand(op: &Operand) -> String {
 fn describe(instr: &ParsedInstruction) -> String {
     match instr {
         ParsedInstruction::Nop => "NOP".to_string(),
+        ParsedInstruction::Inc { dst } => format!("INC {}", fmt_operand(dst)),
+        ParsedInstruction::Dec { dst } => format!("DEC {}", fmt_operand(dst)),
+        ParsedInstruction::Movy { src, dst } => format!("MOVY {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::Movx { src, dst } => format!("MOVX {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::RotateLeft { src, dst } => format!("RL {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::RotateRight { src, dst } => format!("RR {}, {}", fmt_operand(src), fmt_operand(dst)),
         ParsedInstruction::Label(l) => format!("{}:", l),
         ParsedInstruction::Equ { name, value } => format!(".equ {}, {}", name, value),
         ParsedInstruction::Directive { name, args } => format!("{} {}", name, args.join(", ")),
@@ -82,6 +88,7 @@ fn describe(instr: &ParsedInstruction) -> String {
         ParsedInstruction::MacroDef { name, params } => format!(".macro {} {}", name, params.join(", ")),
         ParsedInstruction::MacroEnd => ".endm".to_string(),
         ParsedInstruction::And { src, dst } => format!("AND {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::Andn { src, dst } => format!("ANDN {}, {}", fmt_operand(src), fmt_operand(dst)),
         ParsedInstruction::Or { src, dst } => format!("OR {}, {}", fmt_operand(src), fmt_operand(dst)),
         ParsedInstruction::Xor { src, dst } => format!("XOR {}, {}", fmt_operand(src), fmt_operand(dst)),
         ParsedInstruction::Jmp { target } => format!("JMP {}", fmt_operand(target)),
@@ -89,6 +96,7 @@ fn describe(instr: &ParsedInstruction) -> String {
         ParsedInstruction::Usect { name, section, args } => format!(".usect {} {} {}", name, section, args.join(", ")),
         ParsedInstruction::Trap { vector } => format!("TRAP {}", vector),
         ParsedInstruction::Not { dst } => format!("NOT {}", fmt_operand(dst)),
+        ParsedInstruction::Fill { field } => format!("FILL {}", field).trim_end().to_string(),
         ParsedInstruction::Movb { src, dst } => format!("MOVB {}, {}", fmt_operand(src), fmt_operand(dst)),
         ParsedInstruction::Pixt { src, dst } => format!("PIXT {}, {}", fmt_operand(src), fmt_operand(dst)),
         ParsedInstruction::Dsjs { reg, target } => format!("DSJS {}, {}", fmt_operand(reg), target),
