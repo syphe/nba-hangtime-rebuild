@@ -194,6 +194,7 @@ impl ObjectFile {
                     Operand::Symbol(name) => Some(name.as_str()),
                     _ => None,
                 },
+                Instruction::Move { src: Operand::Symbol(name), .. } => Some(name.as_str()),
                 _ => None,
             };
             if let Some(symbol) = symbol {
@@ -204,7 +205,7 @@ impl ObjectFile {
                     || upper == "FP";
                 if !is_register {
                     let kind = match &instruction {
-                        Instruction::Calla { .. } => "absolute32",
+                        Instruction::Calla { .. } | Instruction::Move { .. } => "absolute32",
                         _ => "tms34010-relative",
                     };
                     fixups.push(ObjectFixup {
@@ -215,6 +216,27 @@ impl ObjectFile {
                         symbol: symbol.to_string(),
                         kind: kind.to_string(),
                     });
+                }
+            }
+            if let Instruction::Directive { name, args } = &instruction {
+                if name.eq_ignore_ascii_case(".WORD") {
+                    for (index, arg) in args.iter().enumerate() {
+                        if !arg.trim().is_empty()
+                            && !arg.starts_with('$')
+                            && !arg.starts_with("0x")
+                            && arg.parse::<i32>().is_err()
+                            && arg.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '#'))
+                        {
+                            fixups.push(ObjectFixup {
+                                offset: section_offsets.get(&current_section).copied().unwrap_or(0)
+                                    + index as u32 * 2,
+                                object_offset: offset + index as u32 * 2,
+                                section: current_section.clone(),
+                                symbol: arg.trim().to_string(),
+                                kind: "absolute16".to_string(),
+                            });
+                        }
+                    }
                 }
             }
             let encoded = encoder::encode_instruction(instruction, offset, &assembler.symbol_table)

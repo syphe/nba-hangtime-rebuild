@@ -138,7 +138,8 @@ pub fn encode_instruction(
                     opcode |= d_val & 0x0F;
 
                     bytes.extend_from_slice(&opcode.to_le_bytes());
-                    bytes.extend_from_slice(&(val as u16).to_le_bytes());
+                    bytes.extend_from_slice(&(val as u32 as u16).to_le_bytes());
+                    bytes.extend_from_slice(&((val as u32 >> 16) as u16).to_le_bytes());
                 }
                 (Operand::Reg(s_reg), Operand::Reg(d_reg)) => {
                     let mut opcode: u16 = 0x2000;

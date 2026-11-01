@@ -117,11 +117,15 @@ def main():
                 continue
             source = section_addresses[section] + fixup["offset"]
             target = symbols[fixup["symbol"].lower()]
-            if fixup.get("kind") == "absolute32":
+            if fixup.get("kind") in ("absolute16", "absolute32"):
+                width = 2 if fixup["kind"] == "absolute16" else 4
                 start = source - ROM_BASE
-                if start < 0 or start + 4 > len(rom):
+                if start < 0 or start + width > len(rom):
                     raise ValueError(f"{path}: absolute fixup is outside the ROM image")
-                rom[start:start + 4] = struct.pack("<I", target)
+                if width == 2:
+                    rom[start:start + 2] = struct.pack("<H", target & 0xFFFF)
+                else:
+                    rom[start:start + 4] = struct.pack("<I", target)
                 continue
             relative = (target - (source + 2)) // 2
             if relative < -128 or relative > 127:
