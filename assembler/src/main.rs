@@ -9,6 +9,7 @@ mod dump;
 mod encoder;
 mod interleaver;
 mod parser;
+mod verify;
 use parser::{Operand, ParsedInstruction, MacroTemplate};
 
 #[derive(Error, Debug)]
@@ -80,6 +81,12 @@ pub struct Assembler {
     pub symbol_table: SymbolTable,
     pub macro_table: HashMap<String, MacroTemplate>,
     current_address: u32,
+}
+
+#[derive(Clone, Copy)]
+struct ConditionalFrame {
+    parent_active: bool,
+    branch_taken: bool,
 }
 
 impl Assembler {
@@ -547,6 +554,9 @@ fn main() -> Result<(), AsmError> {
         binary_output.len(),
         args.output
     );
+
+    verify::verify_rom(&args.output, &ast, &assembler.symbol_table)
+        .map_err(|message| AsmError::Parse { line: 0, message })?;
 
     // Conditionally apply ROM interleaver based on CLI argument
     if args.interleave_ways > 1 {
