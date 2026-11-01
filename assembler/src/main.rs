@@ -66,6 +66,12 @@ impl SymbolTable {
     pub fn get(&self, name: &str) -> Option<&u32> {
         self.symbols.get(name)
     }
+
+    pub fn get_ignore_case(&self, name: &str) -> Option<&u32> {
+        self.symbols.iter()
+            .find(|(symbol, _)| symbol.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value)
+    }
 }
 
 pub type Instruction = parser::ParsedInstruction;
@@ -266,6 +272,22 @@ impl Assembler {
                 }
             }
 
+            // Assignment directives may omit the leading dot in some source
+            // variants and can be spaced around their comma.
+            let upper_assignment = trimmed.to_uppercase();
+            if upper_assignment.starts_with(".ASG") || upper_assignment.starts_with("ASG ") {
+                let assignment = trimmed.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
+                let parts: Vec<&str> = assignment.split(',').collect();
+                if parts.len() >= 2 {
+                    let alias = parts[1].trim();
+                    if !alias.is_empty() {
+                        self.symbol_table.insert(alias.to_string(), 0);
+                    }
+                }
+                ast.push(Instruction::Directive { name: parts.first().unwrap_or(&".ASG").to_string(), args: parts.iter().skip(1).map(|s| s.trim().to_string()).collect() });
+                continue;
+            }
+
             // 8. Check for Directives (e.g. ".WORD")
             if trimmed.starts_with('.') {
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
@@ -274,6 +296,29 @@ impl Assembler {
                 
                 if name.eq_ignore_ascii_case(".WORD") {
                     self.current_address += (args.len() * 2) as u32;
+                }
+                if name.eq_ignore_ascii_case(".asg") || name.eq_ignore_ascii_case(".eval") {
+                    if let Some(arg) = args.first() {
+                        let parts: Vec<&str> = arg.split(',').collect();
+                        if parts.len() >= 2 {
+                            let alias = parts[1].trim();
+                            if !alias.is_empty() {
+                                if self.symbol_table.get(alias).is_none() {
+                                    self.symbol_table.insert(alias.to_string(), 0);
+                                }
+                            }
+                        }
+                    }
+                }
+                if name.eq_ignore_ascii_case(".globl") || name.eq_ignore_ascii_case(".global") || name.eq_ignore_ascii_case(".ref") {
+                    for arg in args.iter().flat_map(|arg| arg.split(',')) {
+                        let symbol = arg.trim();
+                        if !symbol.is_empty() {
+                            if self.symbol_table.get(symbol).is_none() {
+                                self.symbol_table.insert(symbol.to_string(), 0);
+                            }
+                        }
+                    }
                 }
 
                 ast.push(Instruction::Directive { name, args });

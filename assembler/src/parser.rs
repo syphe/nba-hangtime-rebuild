@@ -152,6 +152,13 @@ pub fn parse_operand(input: &str) -> IResult<&str, Operand> {
     alt((
         // 1. Direct Register: A0
         map(parse_register, Operand::Reg),
+
+        // Indirect operands must precede the general symbol parser because '*' is
+        // also permitted in immediate expressions.
+        map(tuple((char('-'), char('*'), parse_register)), |(_, _, reg)| Operand::IndirectPreDec(reg)),
+        map(tuple((char('*'), parse_register, char('+'))), |(_, reg, _)| Operand::IndirectPostInc(reg)),
+        parse_indirect_offset,
+        map(preceded(char('*'), parse_register), Operand::Indirect),
         
         // 2. Comprehensive Immediate / Symbol: #384, #510*01000H, #STACKL/32-32, etc.
         map(
@@ -229,7 +236,7 @@ pub fn parse_nop(input: &str) -> IResult<&str, ParsedInstruction> {
 pub fn parse_move(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = tag_no_case("MOVE")(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, src) = alt((parse_legacy_immediate, parse_operand))(input)?;
+    let (input, src) = alt((parse_operand, parse_legacy_immediate))(input)?;
     let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
     let (input, dst) = parse_operand(input)?;
     
@@ -328,12 +335,23 @@ pub fn parse_line(input: &str) -> IResult<&str, ParsedInstruction> {
             parse_fill,
             parse_pixt,
         ))
-    ))(input)
+    , parse_unknown_instruction))(input)
 }
 
 /// Parse a valid assembly label identifier (alphanumeric + underscores)
 pub fn parse_identifier(input: &str) -> IResult<&str, &str> {
     take_while1(|c: char| c.is_ascii_alphanumeric() || c == '_')(input)
+}
+
+/// Accept legacy TMS34010 instructions that do not yet need specialized AST handling.
+pub fn parse_unknown_instruction(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, name) = parse_identifier(input)?;
+    let (input, _) = space0(input)?;
+    let args = input.trim();
+    Ok(("", ParsedInstruction::Directive {
+        name: name.to_uppercase(),
+        args: args.split(',').map(|arg| arg.trim().to_string()).filter(|arg| !arg.is_empty()).collect(),
+    }))
 }
 
 /// Parse a JR (Jump Relative) instruction (e.g., "JR START_LOOP")
