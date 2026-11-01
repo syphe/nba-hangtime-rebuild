@@ -69,6 +69,8 @@ def main():
             section = section_name(symbol.get("section", "")) if symbol.get("section") else ""
             if section in section_addresses:
                 symbols[symbol["name"].lower()] = section_addresses[section] + symbol.get("section_offset", 0)
+            elif symbol.get("section") == "" and symbol.get("kind") == "symbol":
+                symbols[symbol["name"].lower()] = symbol.get("address", 0)
 
     rom = bytearray([FILL]) * ROM_LENGTH
 

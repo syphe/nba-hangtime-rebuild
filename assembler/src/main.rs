@@ -191,13 +191,20 @@ impl ObjectFile {
                 _ => None,
             };
             if let Some(symbol) = symbol {
-                fixups.push(ObjectFixup {
-                    offset: section_offsets.get(&current_section).copied().unwrap_or(0),
-                    object_offset: offset,
-                    section: current_section.clone(),
-                    symbol: symbol.to_string(),
-                    kind: "tms34010-relative".to_string(),
-                });
+                let upper = symbol.to_ascii_uppercase();
+                let is_register = (upper.starts_with('A') || upper.starts_with('B'))
+                    && upper[1..].chars().all(|c| c.is_ascii_digit())
+                    || upper == "SP"
+                    || upper == "FP";
+                if !is_register {
+                    fixups.push(ObjectFixup {
+                        offset: section_offsets.get(&current_section).copied().unwrap_or(0),
+                        object_offset: offset,
+                        section: current_section.clone(),
+                        symbol: symbol.to_string(),
+                        kind: "tms34010-relative".to_string(),
+                    });
+                }
             }
             let encoded = encoder::encode_instruction(instruction, offset, &assembler.symbol_table)
                 .unwrap_or_default();
@@ -345,6 +352,7 @@ impl Assembler {
     pub fn pass_one(&mut self, lines: &[&str]) -> Result<Vec<Instruction>, AsmError> {
         let mut ast = Vec::new();
         let mut current_macro: Option<MacroTemplate> = None;
+        let mut macro_expansion_count = 0usize;
 
         let mut line_queue: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
         let mut idx = 0;
@@ -498,6 +506,7 @@ impl Assembler {
                         .collect();
 
                     let mut expanded_lines = Vec::new();
+                    let mut local_labels: HashMap<String, String> = HashMap::new();
                     for body_line in &macro_template.body {
                         let mut expanded = body_line.clone();
                         for (p_idx, param_name) in macro_template.params.iter().enumerate() {
@@ -506,11 +515,31 @@ impl Assembler {
                                 expanded = expanded.replace(param_name, arg_val);
                             }
                         }
+
+                        let mut question_index = expanded.find('?');
+                        while let Some(index) = question_index {
+                            let prefix_start = expanded[..index]
+                                .char_indices()
+                                .rev()
+                                .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '_'))
+                                .map(|(pos, c)| pos + c.len_utf8())
+                                .unwrap_or(0);
+                            let local = expanded[prefix_start..index].to_string();
+                            if !local.is_empty() && !local_labels.contains_key(&local) {
+                                local_labels.insert(
+                                    local.clone(),
+                                    format!("{}_macro{}", local, macro_expansion_count),
+                                );
+                            }
+                            question_index = expanded[index + 1..].find('?').map(|pos| index + 1 + pos);
+                        }
+                        for (local, unique) in &local_labels {
+                            expanded = expanded.replace(&format!("{}?", local), unique);
+                        }
                         expanded_lines.push(expanded);
                     }
-
-                    line_queue.splice(idx..idx, expanded_lines);
-                    continue;
+                    macro_expansion_count += 1;
+                    line_queue.splice(idx..idx, expanded_lines);                    continue;
                 }
             }
 
@@ -518,7 +547,19 @@ impl Assembler {
             let mut is_label = false;
             let mut label_name_to_insert = String::new();
 
-            if let Some(stripped) = trimmed.strip_suffix(':') {
+            if let Some(stripped) = trimmed.strip_prefix('#') {
+                let parts: Vec<&str> = stripped.split_whitespace().collect();
+                if let Some(first_word) = parts.first().copied() {
+                    let remainder = stripped[first_word.len()..].trim_start();
+                    let is_equ = remainder.to_ascii_lowercase().starts_with(".equ")
+                        || remainder.to_ascii_lowercase().starts_with("equ ");
+                    if !is_equ {
+                        label_name_to_insert = first_word.trim_end_matches(':').to_string();
+                        is_label = true;
+                        trimmed = remainder;
+                    }
+                }
+            } else if let Some(stripped) = trimmed.strip_suffix(':') {
                 label_name_to_insert = stripped.trim().to_string();
                 is_label = true;
             } else {
@@ -628,7 +669,9 @@ impl Assembler {
                                     | "RR"
                                     | "ADDI"
                                     | "ADDK"
+                                    | "ADD"
                                     | "SUB"
+                                    | "SUBI"
                                     | "SUBK"
                                     | "CMP"
                                     | "CMPI"
@@ -678,6 +721,9 @@ impl Assembler {
                                     | "DSJ"
                                     | "DSJS"
                                     | "SETF"
+                                    | "SETC"
+                                    | "DINT"
+                                    | "EINT"
                                     | "MMFM"
                                     | "MMTM"
                                     | "EXGPC"

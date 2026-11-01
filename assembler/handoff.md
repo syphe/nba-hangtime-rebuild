@@ -52,18 +52,21 @@ A modern, native Rust assembler designed for the TMS34010 arcade graphics proces
 - Object generation now has a linker-development mode (`--object-format` / `build.ps1 -ObjectFormat`) that emits JSON objects with embedded machine code, per-section payloads, symbols, branch/call fixups including section-local offsets. A regenerated clean object sweep produced all 51 JSON objects.
 - The first native experimental linker (`link.py`) now places text/data sections, applies short control-flow fixups, rejects unresolved relocations, and is invoked by `build.ps1 -ObjectFormat` in Makefile module order.
 - `MMTM` label-on-instruction support was added so inline labels such as `ADJ_BOX MMTM ...` enter the symbol table.
-- Full-module linking remains active next work. The linker now uses legacy module-order `.text`/`.data` placement and skips non-ROM fixup sections safely. Full-object validation reaches unresolved-symbol reporting; the remaining pass is to distinguish real cross-module exports from assembler false positives, repair missing label metadata, and support non-short relocation encodings.
+- Hash-prefixed local labels (`#name`) are now recognized as inline definitions and stripped to their symbol name in object metadata. Rebuilding ATTRACT confirms `agn` and `nxta` are emitted as symbols.
+- Final unresolved-symbol cleanup is complete: `ADD` inline-label recognition and A/B register operand filtering were added, and macro expansion now assigns unique names to legacy `?` local labels so macro bodies such as `BADCHK` do not emit false `bad` relocations.
+- A clean rebuild of all 51 objects now completes and the experimental linker writes `build/BB.bin`; no unresolved symbols remain in the final seven-name set.
+- Remaining relocation warnings cover unsupported non-short encodings that must be classified before the linked image can be compared byte-for-byte with legacy output.
 - The earlier standalone COFF-extraction experiment was removed because its section-offset assumptions were not reliable; legacy `BB.OUT` remains a reference only.
 
 ## 6. Next Steps
 
-The next logical implementation step is the modern program linker:
+The next logical implementation step is relocation correctness in the modern program linker:
 
-1. Extend object generation with relocatable metadata: sections, defined symbols, symbol addresses, and relocation/fixup records. Raw `.OBJ` binaries alone cannot be linked correctly.
-2. Add an object/linker format to the Rust executable while preserving ordinary binary assembly output for existing callers.
-3. Implement section placement and symbol resolution according to the memory and section layout in `SRC/BB.CMD`.
-4. Implement relocation application and generate `BB.OUT` in a format compatible with the legacy ROM conversion tools.
-5. Add linking and ROM generation to `assembler/build.ps1`, producing the same ROM names and layout as `BACKUP/XCODE101L/build.py`.
-6. Split and compare modern-linker output against the DOSBox-generated reference ROMs byte-for-byte before modifying graphics tooling.
+1. Classify every `Warning: ... long fixup ...` emitted by `link.py`; separate unsupported multi-word fixups from genuinely invalid symbol operands.
+2. Implement the required relocation encodings in the Rust object fixup metadata and Python linker instead of retaining placeholder values.
+3. Reconcile the experimental flat layout with `SRC/BB.CMD` and legacy section addresses/sizes.
+4. Generate `BB.OUT` in a format compatible with the legacy ROM conversion tools.
+5. Add native ROM conversion/splitting to `assembler/build.ps1` and compare output with the DOSBox reference artifacts byte-for-byte.
+6. Keep graphics replacement and GSP changes separate until the program-ROM linker passes byte comparison.
 
 Graphics replacement remains separate and must not be included in the linker implementation commit.
