@@ -30,6 +30,7 @@ pub enum Operand {
     IndirectPreDec(Register),
     DirectMemory(String), 
     IndirectOffset(Register, i32),
+    IndirectField(Register, String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -73,6 +74,7 @@ pub enum ParsedInstruction {
     Movk { src: Operand, dst: Operand },
     Exgpc(Register),
     Setf { size: Operand, sign: Operand, offset: Operand },
+    Pixt { src: Operand, dst: Operand },
 }
 
 #[derive(Clone, Debug)]
@@ -293,6 +295,7 @@ pub fn parse_line(input: &str) -> IResult<&str, ParsedInstruction> {
             parse_xori,
             parse_exgpc,
             parse_setf,
+            parse_pixt,
         ))
     ))(input)
 }
@@ -798,6 +801,34 @@ pub fn parse_trap(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = multispace1(input)?;
     let (input, vector) = parse_number(input)?;
     Ok((input, ParsedInstruction::Trap { vector }))
+}
+
+/// Parse PIXT instruction, including pixel-field address modifiers such as *A0.XY.
+pub fn parse_pixt(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("PIXT")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (remaining, operands) = nom::bytes::complete::take_while(|_| true)(input)?;
+    let (src_text, dst_text) = operands.split_once(',')
+        .ok_or_else(|| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))?;
+
+    fn parse_pixt_operand(text: &str) -> Option<Operand> {
+        let text = text.trim();
+        if let Some((base, field)) = text.strip_prefix('*').and_then(|s| s.split_once('.')) {
+            let (register_remaining, reg) = parse_register(base).ok()?;
+            if register_remaining.trim().is_empty() {
+                return Some(Operand::IndirectField(reg, format!(".{}", field.trim())));
+            }
+        }
+        let (remaining, operand) = parse_operand(text).ok()?;
+        remaining.trim().is_empty().then_some(operand)
+    }
+
+    let src = parse_pixt_operand(src_text)
+        .ok_or_else(|| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))?;
+    let dst = parse_pixt_operand(dst_text)
+        .ok_or_else(|| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))?;
+
+    Ok((remaining, ParsedInstruction::Pixt { src, dst }))
 }
 
 /// Parse MOVB instruction (e.g., "MOVB *A1, A4")

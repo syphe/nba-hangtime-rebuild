@@ -183,6 +183,9 @@ pub fn encode_instruction(
                 bytes.extend_from_slice(&(fv as u16).to_le_bytes());
             }
         }
+        ParsedInstruction::Pixt { .. } => {
+            bytes.extend_from_slice(&0x0000u16.to_le_bytes());
+        }
         ParsedInstruction::Movb { src, dst } => {
             match (src, dst) {
                 (Operand::Indirect(s_reg), Operand::Reg(d_reg)) => {

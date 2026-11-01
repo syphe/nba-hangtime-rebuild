@@ -43,6 +43,13 @@ fn fmt_operand(op: &Operand) -> String {
             };
             format!("*{}({})", s, offset)
         }
+        Operand::IndirectField(reg, field) => {
+            let s = match reg {
+                Register::A(n) => format!("A{}", n),
+                Register::B(n) => format!("B{}", n),
+            };
+            format!("*{}{}", s, field)
+        }
     }
 }
 
@@ -82,6 +89,7 @@ fn describe(instr: &ParsedInstruction) -> String {
         ParsedInstruction::Usect { name, section, args } => format!(".usect {} {} {}", name, section, args.join(", ")),
         ParsedInstruction::Trap { vector } => format!("TRAP {}", vector),
         ParsedInstruction::Movb { src, dst } => format!("MOVB {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::Pixt { src, dst } => format!("PIXT {}, {}", fmt_operand(src), fmt_operand(dst)),
         ParsedInstruction::Dsjs { reg, target } => format!("DSJS {}, {}", fmt_operand(reg), target),
         ParsedInstruction::Calla { target } => format!("CALLA {}", fmt_operand(target)),
         ParsedInstruction::Btst { src, dst } => format!("BTST {}, {}", fmt_operand(src), fmt_operand(dst)),
