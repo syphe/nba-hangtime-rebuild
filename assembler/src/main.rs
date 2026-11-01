@@ -120,7 +120,9 @@ impl ObjectFile {
                     if let Some(section) = args.first() {
                         label_section = section.trim_matches(|c| c == '"' || c == '\'').to_string();
                     }
-                } else if matches!(directive.as_str(), "text" | "data" | "bss") {
+                } else if matches!(directive.as_str(), "text" | "data" | "bss")
+                    && args.is_empty()
+                {
                     label_section = format!(".{directive}");
                 }
             }
@@ -167,7 +169,7 @@ impl ObjectFile {
                 let section_name = if directive == "sect" {
                     args.first()
                         .map(|value| value.trim_matches(|c| c == '"' || c == '\'').to_string())
-                } else if matches!(directive.as_str(), "text" | "data" | "bss") {
+                } else if matches!(directive.as_str(), "text" | "data" | "bss") && args.is_empty() {
                     Some(format!(".{directive}"))
                 } else {
                     None
@@ -610,6 +612,7 @@ impl Assembler {
                             | "JRNC"
                             | "JRLT"
                             | "JRGT"
+                            | "JRGE"
                             | "JRHS"
                             | "JRLO"
                             | "JRZ"
@@ -670,7 +673,9 @@ impl Assembler {
                                     | "ADDI"
                                     | "ADDK"
                                     | "ADD"
+                                    | "ADDXY"
                                     | "SUB"
+                                    | "SUBXY"
                                     | "SUBI"
                                     | "SUBK"
                                     | "CMP"
@@ -700,6 +705,7 @@ impl Assembler {
                                     | "JRNC"
                                     | "JRLT"
                                     | "JRGT"
+                                    | "JRGE"
                                     | "JRHS"
                                     | "JRLO"
                                     | "JRZ"

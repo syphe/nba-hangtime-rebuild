@@ -55,15 +55,16 @@ A modern, native Rust assembler designed for the TMS34010 arcade graphics proces
 - Hash-prefixed local labels (`#name`) are now recognized as inline definitions and stripped to their symbol name in object metadata. Rebuilding ATTRACT confirms `agn` and `nxta` are emitted as symbols.
 - Final unresolved-symbol cleanup is complete: `ADD` inline-label recognition and A/B register operand filtering were added, and macro expansion now assigns unique names to legacy `?` local labels so macro bodies such as `BADCHK` do not emit false `bad` relocations.
 - A clean rebuild of all 51 objects now completes and the experimental linker writes `build/BB.bin`; no unresolved symbols remain in the final seven-name set.
-- Remaining relocation warnings cover unsupported non-short encodings that must be classified before the linked image can be compared byte-for-byte with legacy output.
+- Relocation classification is now implemented in `link.py`: a clean link applies 3,489 short relative relocations, while reporting 1,523 positive and 519 negative out-of-range relative relocations that require extended branch encoding.
+- Section allocation directives such as `.BSS name,size` are no longer mistaken for section switches, correcting `.text` symbol metadata and eliminating cross-module false addresses.
 - The earlier standalone COFF-extraction experiment was removed because its section-offset assumptions were not reliable; legacy `BB.OUT` remains a reference only.
 
 ## 6. Next Steps
 
 The next logical implementation step is relocation correctness in the modern program linker:
 
-1. Classify every `Warning: ... long fixup ...` emitted by `link.py`; separate unsupported multi-word fixups from genuinely invalid symbol operands.
-2. Implement the required relocation encodings in the Rust object fixup metadata and Python linker instead of retaining placeholder values.
+1. Implement extended PC-relative branches for the remaining 2,042 out-of-range relocations; the encoder currently clamps these to signed 8-bit placeholders, so object sizes must be recalculated during AST encoding.
+2. Add explicit relocation kinds for any absolute/address fixups emitted by `MOVI`, `CALLA`, and `.WORD` operands, then apply them in `link.py`.
 3. Reconcile the experimental flat layout with `SRC/BB.CMD` and legacy section addresses/sizes.
 4. Generate `BB.OUT` in a format compatible with the legacy ROM conversion tools.
 5. Add native ROM conversion/splitting to `assembler/build.ps1` and compare output with the DOSBox reference artifacts byte-for-byte.

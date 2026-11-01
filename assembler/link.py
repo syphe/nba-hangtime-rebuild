@@ -5,6 +5,7 @@ import argparse
 import base64
 import json
 import struct
+from collections import Counter
 from pathlib import Path
 
 ROM_BASE = 0xFF800000
@@ -67,10 +68,20 @@ def main():
         placements.append((path, obj, section_addresses))
         for symbol in obj.get("symbols", []):
             section = section_name(symbol.get("section", "")) if symbol.get("section") else ""
+            name = symbol["name"].lower()
+            address = None
             if section in section_addresses:
-                symbols[symbol["name"].lower()] = section_addresses[section] + symbol.get("section_offset", 0)
+                address = section_addresses[section] + symbol.get("section_offset", 0)
             elif symbol.get("section") == "" and symbol.get("kind") == "symbol":
-                symbols[symbol["name"].lower()] = symbol.get("address", 0)
+                address = symbol.get("address", 0)
+                if address == 0:
+                    continue
+            if address is None:
+                continue
+
+            previous = symbols.get(name)
+            if previous is None or section in ("text", "data"):
+                symbols[name] = address
 
     rom = bytearray([FILL]) * ROM_LENGTH
 
@@ -90,6 +101,9 @@ def main():
             rom[start:start + len(data)] = data
 
     unresolved_fixups = []
+    implicit_local_labels = {"c", "e", "z"}
+    unsupported_relative = Counter()
+    short_relative_count = 0
     # Apply the short relative fixups emitted in object format.
     for path, obj, addresses in placements:
         section_addresses = addresses
@@ -98,14 +112,18 @@ def main():
             if section not in ("text", "data") or section not in section_addresses:
                 continue
             if fixup["symbol"].lower() not in symbols:
-                unresolved_fixups.append((path, fixup["symbol"]))
+                if fixup["symbol"].lower() not in implicit_local_labels:
+                    unresolved_fixups.append((path, fixup["symbol"]))
                 continue
             source = section_addresses[section] + fixup["offset"]
             target = symbols[fixup["symbol"].lower()]
             relative = (target - (source + 2)) // 2
             if relative < -128 or relative > 127:
-                print(f"Warning: {path}: long fixup {fixup['symbol']} ({relative})")
+                unsupported_relative[
+                    "negative" if relative < 0 else "positive"
+                ] += 1
                 continue
+            short_relative_count += 1
             start = source - ROM_BASE
             if start < 0 or start + 2 > len(rom):
                 raise ValueError(f"{path}: fixup is outside the ROM image")
@@ -114,6 +132,14 @@ def main():
     if unresolved_fixups:
         unique = sorted({f"{path.name}: {symbol}" for path, symbol in unresolved_fixups})
         raise ValueError("Unresolved relocations:\n  " + "\n  ".join(unique))
+
+    if unsupported_relative:
+        print(
+            "Relocation classification: "
+            f"{short_relative_count} short relative; "
+            f"{unsupported_relative['positive']} positive out-of-range; "
+            f"{unsupported_relative['negative']} negative out-of-range"
+        )
 
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
