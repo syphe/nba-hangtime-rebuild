@@ -1,6 +1,7 @@
 param(
     [switch]$Clean,
-    [switch]$ShowVerbose
+    [switch]$ShowVerbose,
+    [switch]$ObjectFormat
 )
 
 $ErrorActionPreference = "Stop"
@@ -120,6 +121,7 @@ foreach ($module in $modules) {
     Write-Host "ASSEMBLING: $module.ASM -> $module.OBJ" -ForegroundColor Green
     $arguments = @("--input", $source.FullName, "--output", $object, "--interleave-ways", "1")
     if ($ShowVerbose) { $arguments += "--verbose" }
+    if ($ObjectFormat) { $arguments += "--object-format" }
     & $exe @arguments
     if ($LASTEXITCODE -ne 0) {
         Write-Host "FAILED: $module.ASM (exit $LASTEXITCODE)" -ForegroundColor Red
@@ -130,6 +132,22 @@ foreach ($module in $modules) {
 if ($failed -ne 0) {
     Write-Host "Assembly build failed: $failed module(s)" -ForegroundColor Red
     exit 1
+}
+
+if ($ObjectFormat) {
+    Write-Host "LINKING: relocatable objects -> BB.bin" -ForegroundColor Cyan
+    Push-Location $assemblerDir
+    try {
+        $objects = foreach ($module in $modules) {
+            $object = Join-Path $outputDir "$module.OBJ"
+            if (Test-Path $object) { $object }
+        }
+            & python link.py @objects --output (Join-Path $outputDir "BB.bin")
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+    finally {
+        Pop-Location
+    }
 }
 
 Write-Host "Assembly build completed: $outputDir" -ForegroundColor Green

@@ -44,7 +44,7 @@ cd assembler
 .\build.ps1
 ```
 
-Objects are written to `assembler/build/*.OBJ`. Use `-Clean` to remove and rebuild all objects, or `-ShowVerbose` to show assembler symbol and pass output.
+Objects are written to `assembler/build/*.OBJ`. Use `-Clean` to remove and rebuild all objects, or `-ShowVerbose` to show assembler symbol and pass output. Use `-ObjectFormat` to emit linker-development JSON objects containing embedded text and symbol metadata instead of raw assembled binaries.
 
 ## MAME
 

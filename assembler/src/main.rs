@@ -1,6 +1,7 @@
 use clap::Parser;
-use std::path::{Path, PathBuf};
+use serde::Serialize;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use std::fs;
@@ -10,7 +11,7 @@ mod encoder;
 mod interleaver;
 mod parser;
 mod verify;
-use parser::{Operand, ParsedInstruction, MacroTemplate};
+use parser::{MacroTemplate, Operand, ParsedInstruction};
 
 #[derive(Error, Debug)]
 pub enum AsmError {
@@ -43,6 +44,10 @@ struct Args {
     #[arg(short = 'w', long, default_value_t = 2)]
     interleave_ways: usize,
 
+    /// Write a relocatable JSON object containing symbols and code (for linker development).
+    #[arg(long)]
+    object_format: bool,
+
     /// Verbose output showing passes and symbol table
     #[arg(short, long)]
     verbose: bool,
@@ -59,6 +64,179 @@ pub struct SymbolTable {
     symbols: HashMap<String, u32>,
 }
 
+#[derive(Serialize)]
+struct ObjectSymbol {
+    name: String,
+    address: u32,
+    section: String,
+    section_offset: u32,
+    kind: String,
+}
+
+#[derive(Serialize)]
+struct ObjectFixup {
+    offset: u32,
+    object_offset: u32,
+    section: String,
+    symbol: String,
+    kind: String,
+}
+
+#[derive(Serialize, Clone)]
+struct ObjectSection {
+    name: String,
+    data: String,
+}
+
+#[derive(Serialize)]
+struct ObjectFile {
+    format: &'static str,
+    version: u32,
+    source: String,
+    text_address: u32,
+    text: String,
+    sections: Vec<ObjectSection>,
+    symbols: Vec<ObjectSymbol>,
+    fixups: Vec<ObjectFixup>,
+}
+
+impl ObjectFile {
+    fn from_assembler(
+        source: &Path,
+        assembler: &Assembler,
+        ast: &[Instruction],
+        binary: &[u8],
+    ) -> Self {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+        let mut symbol_sections = HashMap::<String, String>::new();
+        let mut symbol_section_offsets = HashMap::<String, u32>::new();
+        let mut label_section = ".text".to_string();
+        let mut section_offsets = HashMap::<String, u32>::new();
+        for instruction in ast {
+            if let Instruction::Directive { name, args } = instruction {
+                let directive = name.trim_start_matches('.').to_ascii_lowercase();
+                if directive == "sect" {
+                    if let Some(section) = args.first() {
+                        label_section = section.trim_matches(|c| c == '"' || c == '\'').to_string();
+                    }
+                } else if matches!(directive.as_str(), "text" | "data" | "bss") {
+                    label_section = format!(".{directive}");
+                }
+            }
+            if let Instruction::Label(name) = instruction {
+                symbol_sections.insert(name.clone(), label_section.clone());
+                symbol_section_offsets.insert(
+                    name.clone(),
+                    section_offsets.get(&label_section).copied().unwrap_or(0),
+                );
+            }
+            if !matches!(instruction, Instruction::Directive { name, .. } if {
+                let directive = name.trim_start_matches('.').to_ascii_lowercase();
+                directive == "sect" || matches!(directive.as_str(), "text" | "data" | "bss")
+            }) {
+                let len = encoder::encode_instruction(instruction, 0, &assembler.symbol_table)
+                    .map(|bytes| bytes.len() as u32)
+                    .unwrap_or(2);
+                *section_offsets.entry(label_section.clone()).or_default() += len;
+            }
+        }
+
+        let mut symbols: Vec<ObjectSymbol> = assembler
+            .symbol_table
+            .symbols
+            .iter()
+            .map(|(name, address)| ObjectSymbol {
+                name: name.clone(),
+                address: *address,
+                section: symbol_sections.get(name).cloned().unwrap_or_default(),
+                section_offset: symbol_section_offsets.get(name).copied().unwrap_or(0),
+                kind: "symbol".to_string(),
+            })
+            .collect();
+        symbols.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let mut fixups = Vec::new();
+        let mut section_offsets = HashMap::<String, u32>::new();
+        let mut section_data: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut current_section = ".text".to_string();
+        let mut offset = 0u32;
+        for instruction in ast {
+            if let Instruction::Directive { name, args } = instruction {
+                let directive = name.trim_start_matches('.').to_ascii_lowercase();
+                let section_name = if directive == "sect" {
+                    args.first()
+                        .map(|value| value.trim_matches(|c| c == '"' || c == '\'').to_string())
+                } else if matches!(directive.as_str(), "text" | "data" | "bss") {
+                    Some(format!(".{directive}"))
+                } else {
+                    None
+                };
+                if let Some(section_name) = section_name {
+                    current_section = section_name;
+                }
+            }
+
+            let symbol = match instruction {
+                Instruction::Jr { label }
+                | Instruction::Call { label }
+                | Instruction::Callr { label }
+                | Instruction::Jeq { label }
+                | Instruction::Jne { label } => Some(label.as_str()),
+                Instruction::Jlt { target } | Instruction::Jgt { target } => Some(target.as_str()),
+                Instruction::Jmp { target } => match target {
+                    Operand::Symbol(name) => Some(name.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(symbol) = symbol {
+                fixups.push(ObjectFixup {
+                    offset: section_offsets.get(&current_section).copied().unwrap_or(0),
+                    object_offset: offset,
+                    section: current_section.clone(),
+                    symbol: symbol.to_string(),
+                    kind: "tms34010-relative".to_string(),
+                });
+            }
+            let encoded = encoder::encode_instruction(instruction, offset, &assembler.symbol_table)
+                .unwrap_or_default();
+            let encoded_len = encoded.len() as u32;
+            if !encoded.is_empty() {
+                let section = section_data
+                    .iter_mut()
+                    .find(|(name, _)| name == &current_section);
+                if let Some((_, data)) = section {
+                    data.extend_from_slice(&encoded);
+                } else {
+                    section_data.push((current_section.clone(), encoded.clone()));
+                }
+                *section_offsets.entry(current_section.clone()).or_default() += encoded_len;
+            }
+            offset += encoded_len;
+        }
+
+        let sections = section_data
+            .into_iter()
+            .map(|(name, data)| ObjectSection {
+                name,
+                data: STANDARD.encode(data),
+            })
+            .collect();
+
+        Self {
+            format: "tms34010-object",
+            version: 1,
+            source: source.to_string_lossy().into_owned(),
+            text_address: 0,
+            text: STANDARD.encode(binary),
+            sections,
+            symbols,
+            fixups,
+        }
+    }
+}
+
 impl SymbolTable {
     pub fn insert(&mut self, name: String, addr: u32) {
         self.symbols.insert(name, addr);
@@ -69,7 +247,8 @@ impl SymbolTable {
     }
 
     pub fn get_ignore_case(&self, name: &str) -> Option<&u32> {
-        self.symbols.iter()
+        self.symbols
+            .iter()
             .find(|(symbol, _)| symbol.eq_ignore_ascii_case(name))
             .map(|(_, value)| value)
     }
@@ -117,12 +296,20 @@ impl Assembler {
     }
 
     fn eval_arithmetic(&self, expression: &str) -> i32 {
-        let expression = expression.trim().trim_matches(|c| c == '(' || c == ')').trim();
-        if expression.is_empty() { return 0; }
+        let expression = expression
+            .trim()
+            .trim_matches(|c| c == '(' || c == ')')
+            .trim();
+        if expression.is_empty() {
+            return 0;
+        }
         if let Some(hex) = expression.strip_prefix('$') {
             return i32::from_str_radix(hex, 16).unwrap_or(0);
         }
-        if let Some(hex) = expression.strip_prefix("0x").or_else(|| expression.strip_prefix("0X")) {
+        if let Some(hex) = expression
+            .strip_prefix("0x")
+            .or_else(|| expression.strip_prefix("0X"))
+        {
             return i32::from_str_radix(hex, 16).unwrap_or(0);
         }
         if let Some((left, right)) = expression.split_once('+') {
@@ -137,8 +324,13 @@ impl Assembler {
         if let Some((left, right)) = expression.split_once('&') {
             return self.eval_arithmetic(left.trim()) & self.eval_arithmetic(right.trim());
         }
-        if let Ok(value) = expression.parse::<i32>() { return value; }
-        self.symbol_table.get_ignore_case(expression).copied().unwrap_or(0) as i32
+        if let Ok(value) = expression.parse::<i32>() {
+            return value;
+        }
+        self.symbol_table
+            .get_ignore_case(expression)
+            .copied()
+            .unwrap_or(0) as i32
     }
 
     pub fn new() -> Self {
@@ -158,11 +350,13 @@ impl Assembler {
         let mut idx = 0;
         let mut conditionals: Vec<ConditionalFrame> = Vec::new();
 
-        self.macro_table.entry("JAUC".to_string()).or_insert(MacroTemplate {
-            name: "JAUC".to_string(),
-            params: vec!["P1".to_string()],
-            body: vec!["jmp\t:P1:".to_string()],
-        });
+        self.macro_table
+            .entry("JAUC".to_string())
+            .or_insert(MacroTemplate {
+                name: "JAUC".to_string(),
+                params: vec!["P1".to_string()],
+                body: vec!["jmp\t:P1:".to_string()],
+            });
 
         while idx < line_queue.len() {
             let raw_line = line_queue[idx].clone();
@@ -180,12 +374,18 @@ impl Assembler {
             let upper_trimmed = trimmed.to_uppercase();
 
             let conditional_directive = upper_trimmed.split_whitespace().next().unwrap_or("");
-            if conditional_directive == ".IF" || conditional_directive == ".ELSE" || conditional_directive == ".ENDIF" {
+            if conditional_directive == ".IF"
+                || conditional_directive == ".ELSE"
+                || conditional_directive == ".ENDIF"
+            {
                 let parent_active = conditionals.iter().all(|frame| frame.branch_taken);
                 if conditional_directive == ".IF" {
                     let expression = trimmed.splitn(2, char::is_whitespace).nth(1).unwrap_or("0");
                     let active = parent_active && self.eval_condition(expression) != 0;
-                    conditionals.push(ConditionalFrame { parent_active, branch_taken: active });
+                    conditionals.push(ConditionalFrame {
+                        parent_active,
+                        branch_taken: active,
+                    });
                 } else if conditional_directive == ".ELSE" {
                     if let Some(frame) = conditionals.last_mut() {
                         frame.branch_taken = frame.parent_active && !frame.branch_taken;
@@ -220,10 +420,13 @@ impl Assembler {
             }
 
             // 1b. Check for Multi-Line Macro Definition (.macro) FIRST
-            if let Ok((_, ParsedInstruction::MacroDef { name, params })) = parser::parse_line(trimmed) {
+            if let Ok((_, ParsedInstruction::MacroDef { name, params })) =
+                parser::parse_line(trimmed)
+            {
                 if let Some(prev_macro) = current_macro.take() {
                     println!("[DEBUG] Auto-closing unended macro: {}", prev_macro.name);
-                    self.macro_table.insert(prev_macro.name.to_uppercase(), prev_macro);
+                    self.macro_table
+                        .insert(prev_macro.name.to_uppercase(), prev_macro);
                 }
                 current_macro = Some(MacroTemplate {
                     name: name.to_uppercase(),
@@ -236,7 +439,8 @@ impl Assembler {
             // 2. If we are currently recording a macro definition body
             if let Some(ref mut macro_def) = current_macro {
                 if trimmed.eq_ignore_ascii_case(".endm") {
-                    self.macro_table.insert(macro_def.name.to_uppercase(), macro_def.clone());
+                    self.macro_table
+                        .insert(macro_def.name.to_uppercase(), macro_def.clone());
                     current_macro = None;
                 } else {
                     macro_def.body.push(raw_line);
@@ -252,7 +456,12 @@ impl Assembler {
             let line_num = idx; // approximate
 
             // 4. Check for .equ Equates FIRST (before labels)
-            if upper_trimmed.contains(".EQU") || upper_trimmed.split_whitespace().nth(1).is_some_and(|word| word.eq_ignore_ascii_case("EQU")) {
+            if upper_trimmed.contains(".EQU")
+                || upper_trimmed
+                    .split_whitespace()
+                    .nth(1)
+                    .is_some_and(|word| word.eq_ignore_ascii_case("EQU"))
+            {
                 match parser::parse_equ(trimmed) {
                     Ok((_, Instruction::Equ { name, value })) => {
                         self.symbol_table.insert(name.clone(), value as u32);
@@ -317,17 +526,84 @@ impl Assembler {
                 if !parts.is_empty() {
                     let first_word = parts[0];
                     let upper_first = first_word.to_uppercase();
-                    
-                    let is_opcode = matches!(upper_first.as_str(),
-                        "MOVE" | "MOVB" | "INC" | "DEC" | "MOVK" | "MOVX" | "MOVY" | "RL" | "RR" | "ADDI" | "ADDK" | "SUB" | "SUBK" |
-                        "CMP" | "CMPI" | "JMP" | "NOP" | "RETS" | "SLL" | "SRL" | "SLA" | "SRA" |
-                        "AND" | "ANDN" | "ANDI" | "OR" | "ORI" | "XOR" | "XORI" | "MOVI" | "JR" | "JRUC" | "JREQ" | "JRNE" | "JRNZ" | "JRZ" | "JRC" | "JRNC" | "JRLT" | "JRGT" | "JRHS" | "JRLO" |
-                        "JRZ" | "JRN" | "JRNZ" | "JEQ" | "JNE" | "JLT" | "JGT" | "CALL" | "CALLA" |
-                        "CALLR" | "CALLI" | "BTST" | "CLR" | "PIXT" | "FILL" | "NOT" | "DSJ" | "DSJS" | "SETF" | "MMFM" | "EXGPC" | "TRAP");
+
+                    let is_opcode = matches!(
+                        upper_first.as_str(),
+                        "MOVE"
+                            | "MOVB"
+                            | "INC"
+                            | "DEC"
+                            | "MOVK"
+                            | "MOVX"
+                            | "MOVY"
+                            | "RL"
+                            | "RR"
+                            | "ADDI"
+                            | "ADDK"
+                            | "SUB"
+                            | "SUBK"
+                            | "CMP"
+                            | "CMPI"
+                            | "JMP"
+                            | "NOP"
+                            | "RETS"
+                            | "SLL"
+                            | "SRL"
+                            | "SLA"
+                            | "SRA"
+                            | "AND"
+                            | "ANDN"
+                            | "ANDI"
+                            | "OR"
+                            | "ORI"
+                            | "XOR"
+                            | "XORI"
+                            | "MOVI"
+                            | "JR"
+                            | "JRUC"
+                            | "JREQ"
+                            | "JRNE"
+                            | "JRNZ"
+                            | "JRZ"
+                            | "JRC"
+                            | "JRNC"
+                            | "JRLT"
+                            | "JRGT"
+                            | "JRHS"
+                            | "JRLO"
+                            | "JRZ"
+                            | "JRN"
+                            | "JRNZ"
+                            | "JEQ"
+                            | "JNE"
+                            | "JLT"
+                            | "JGT"
+                            | "CALL"
+                            | "CALLA"
+                            | "CALLR"
+                            | "CALLI"
+                            | "BTST"
+                            | "CLR"
+                            | "PIXT"
+                            | "FILL"
+                            | "NOT"
+                            | "DSJ"
+                            | "DSJS"
+                            | "SETF"
+                            | "MMFM"
+                            | "EXGPC"
+                            | "TRAP"
+                    );
                     let is_directive = first_word.starts_with('.');
                     let is_macro = self.macro_table.contains_key(&upper_first);
 
-                    if !is_opcode && !is_directive && !is_macro && first_word.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$') {
+                    if !is_opcode
+                        && !is_directive
+                        && !is_macro
+                        && first_word
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+                    {
                         if parts.len() == 1 {
                             label_name_to_insert = first_word.to_string();
                             is_label = true;
@@ -339,13 +615,78 @@ impl Assembler {
                         } else {
                             let second_word = parts[1];
                             let upper_second = second_word.to_uppercase();
-                            let second_is_opcode = matches!(upper_second.as_str(),
-                                "MOVE" | "MOVB" | "INC" | "DEC" | "MOVK" | "MOVX" | "MOVY" | "RL" | "RR" | "ADDI" | "ADDK" | "SUB" | "SUBK" |
-                                "CMP" | "CMPI" | "JMP" | "NOP" | "RETS" | "SLL" | "SRL" | "SLA" | "SRA" |
-                                "AND" | "ANDN" | "ANDI" | "OR" | "ORI" | "XOR" | "XORI" | "MOVI" | "JR" | "JRUC" | "JREQ" | "JRNE" | "JRNZ" | "JRZ" | "JRC" | "JRNC" | "JRLT" | "JRGT" | "JRHS" | "JRLO" |
-                                "JRZ" | "JRN" | "JRNZ" | "JEQ" | "JNE" | "JLT" | "JGT" | "CALL" | "CALLA" |
-                                "CALLR" | "CALLI" | "BTST" | "CLR" | "PIXT" | "FILL" | "NOT" | "DSJ" | "DSJS" | "SETF" | "MMFM" | "EXGPC" | "TRAP");
-                            if second_word.starts_with('.') || second_is_opcode || self.macro_table.contains_key(&upper_second) {
+                            let second_is_opcode = matches!(
+                                upper_second.as_str(),
+                                "MOVE"
+                                    | "MOVB"
+                                    | "INC"
+                                    | "DEC"
+                                    | "MOVK"
+                                    | "MOVX"
+                                    | "MOVY"
+                                    | "RL"
+                                    | "RR"
+                                    | "ADDI"
+                                    | "ADDK"
+                                    | "SUB"
+                                    | "SUBK"
+                                    | "CMP"
+                                    | "CMPI"
+                                    | "JMP"
+                                    | "NOP"
+                                    | "RETS"
+                                    | "SLL"
+                                    | "SRL"
+                                    | "SLA"
+                                    | "SRA"
+                                    | "AND"
+                                    | "ANDN"
+                                    | "ANDI"
+                                    | "OR"
+                                    | "ORI"
+                                    | "XOR"
+                                    | "XORI"
+                                    | "MOVI"
+                                    | "JR"
+                                    | "JRUC"
+                                    | "JREQ"
+                                    | "JRNE"
+                                    | "JRNZ"
+                                    | "JRZ"
+                                    | "JRC"
+                                    | "JRNC"
+                                    | "JRLT"
+                                    | "JRGT"
+                                    | "JRHS"
+                                    | "JRLO"
+                                    | "JRZ"
+                                    | "JRN"
+                                    | "JRNZ"
+                                    | "JEQ"
+                                    | "JNE"
+                                    | "JLT"
+                                    | "JGT"
+                                    | "CALL"
+                                    | "CALLA"
+                                    | "CALLR"
+                                    | "CALLI"
+                                    | "BTST"
+                                    | "CLR"
+                                    | "PIXT"
+                                    | "FILL"
+                                    | "NOT"
+                                    | "DSJ"
+                                    | "DSJS"
+                                    | "SETF"
+                                    | "MMFM"
+                                    | "MMTM"
+                                    | "EXGPC"
+                                    | "TRAP"
+                            );
+                            if second_word.starts_with('.')
+                                || second_is_opcode
+                                || self.macro_table.contains_key(&upper_second)
+                            {
                                 label_name_to_insert = first_word.to_string();
                                 is_label = true;
                                 trimmed = trimmed[first_word.len()..].trim();
@@ -356,7 +697,8 @@ impl Assembler {
             }
 
             if is_label {
-                self.symbol_table.insert(label_name_to_insert.clone(), self.current_address);
+                self.symbol_table
+                    .insert(label_name_to_insert.clone(), self.current_address);
                 ast.push(Instruction::Label(label_name_to_insert));
                 if trimmed.is_empty() {
                     continue;
@@ -367,7 +709,11 @@ impl Assembler {
             // variants and can be spaced around their comma.
             let upper_assignment = trimmed.to_uppercase();
             if upper_assignment.starts_with(".ASG") || upper_assignment.starts_with("ASG ") {
-                let assignment = trimmed.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
+                let assignment = trimmed
+                    .split_whitespace()
+                    .skip(1)
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let parts: Vec<&str> = assignment.split(',').collect();
                 if parts.len() >= 2 {
                     let alias = parts[1].trim();
@@ -375,7 +721,10 @@ impl Assembler {
                         self.symbol_table.insert(alias.to_string(), 0);
                     }
                 }
-                ast.push(Instruction::Directive { name: parts.first().unwrap_or(&".ASG").to_string(), args: parts.iter().skip(1).map(|s| s.trim().to_string()).collect() });
+                ast.push(Instruction::Directive {
+                    name: parts.first().unwrap_or(&".ASG").to_string(),
+                    args: parts.iter().skip(1).map(|s| s.trim().to_string()).collect(),
+                });
                 continue;
             }
 
@@ -384,7 +733,7 @@ impl Assembler {
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
                 let name = parts[0].to_string();
                 let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
-                
+
                 if name.eq_ignore_ascii_case(".WORD") {
                     self.current_address += (args.len() * 2) as u32;
                 }
@@ -401,7 +750,10 @@ impl Assembler {
                         }
                     }
                 }
-                if name.eq_ignore_ascii_case(".globl") || name.eq_ignore_ascii_case(".global") || name.eq_ignore_ascii_case(".ref") {
+                if name.eq_ignore_ascii_case(".globl")
+                    || name.eq_ignore_ascii_case(".global")
+                    || name.eq_ignore_ascii_case(".ref")
+                {
                     for arg in args.iter().flat_map(|arg| arg.split(',')) {
                         let symbol = arg.trim();
                         if !symbol.is_empty() {
@@ -422,11 +774,11 @@ impl Assembler {
                 if !parts.is_empty() {
                     let name = parts[0].to_string();
                     self.symbol_table.insert(name.clone(), self.current_address);
-                    
+
                     let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
-                    ast.push(Instruction::Directive { 
-                        name: ".usect".to_string(), 
-                        args 
+                    ast.push(Instruction::Directive {
+                        name: ".usect".to_string(),
+                        args,
                     });
                     continue;
                 }
@@ -442,13 +794,10 @@ impl Assembler {
                     } else {
                         Vec::new()
                     };
-                    
-                    self.current_address += 4; 
 
-                    ast.push(Instruction::Directive { 
-                        name, 
-                        args 
-                    });
+                    self.current_address += 4;
+
+                    ast.push(Instruction::Directive { name, args });
                     continue;
                 }
             }
@@ -456,10 +805,18 @@ impl Assembler {
             // 9. Parse Instructions with move/movi/jrz/jrn translation and size suffix stripping
             let mut parser_trimmed = trimmed.to_string();
             let upper_pt = parser_trimmed.to_uppercase();
-            if (upper_pt.starts_with("MOVE") || upper_pt.starts_with("MOVI") || upper_pt.starts_with("ADD") || upper_pt.starts_with("SUB")) 
-                && (parser_trimmed.ends_with(",L") || parser_trimmed.ends_with(",W") || parser_trimmed.ends_with(",l") || parser_trimmed.ends_with(",w")) 
+            if (upper_pt.starts_with("MOVE")
+                || upper_pt.starts_with("MOVI")
+                || upper_pt.starts_with("ADD")
+                || upper_pt.starts_with("SUB"))
+                && (parser_trimmed.ends_with(",L")
+                    || parser_trimmed.ends_with(",W")
+                    || parser_trimmed.ends_with(",l")
+                    || parser_trimmed.ends_with(",w"))
             {
-                parser_trimmed = parser_trimmed[..parser_trimmed.len() - 2].trim().to_string();
+                parser_trimmed = parser_trimmed[..parser_trimmed.len() - 2]
+                    .trim()
+                    .to_string();
             }
 
             let upper_pt_2 = parser_trimmed.to_uppercase();
@@ -482,10 +839,16 @@ impl Assembler {
                             if matches!(src, Operand::Immediate(_) | Operand::Symbol(_)) {
                                 extra_words += 1;
                             }
-                            if matches!(src, Operand::DirectMemory(_) | Operand::IndirectOffset { .. }) {
+                            if matches!(
+                                src,
+                                Operand::DirectMemory(_) | Operand::IndirectOffset { .. }
+                            ) {
                                 extra_words += 1;
                             }
-                            if matches!(dst, Operand::DirectMemory(_) | Operand::IndirectOffset { .. }) {
+                            if matches!(
+                                dst,
+                                Operand::DirectMemory(_) | Operand::IndirectOffset { .. }
+                            ) {
                                 extra_words += 1;
                             }
                             if field.is_some() {
@@ -493,27 +856,34 @@ impl Assembler {
                             }
                             self.current_address += 2 + (extra_words * 2);
                         }
-                        Instruction::Add { src, dst } 
-                        | Instruction::Sub { src, dst } 
-                        | Instruction::Sll { src, dst } 
+                        Instruction::Add { src, dst }
+                        | Instruction::Sub { src, dst }
+                        | Instruction::Sll { src, dst }
                         | Instruction::Srl { src, dst }
-                        | Instruction::And { src, dst } 
-                        | Instruction::Or { src, dst }  
+                        | Instruction::And { src, dst }
+                        | Instruction::Or { src, dst }
                         | Instruction::Xor { src, dst } => {
                             let mut extra_words = 0;
                             if matches!(src, Operand::Immediate(_) | Operand::Symbol(_)) {
                                 extra_words += 1;
                             }
-                            if matches!(src, Operand::DirectMemory(_) | Operand::IndirectOffset { .. }) {
+                            if matches!(
+                                src,
+                                Operand::DirectMemory(_) | Operand::IndirectOffset { .. }
+                            ) {
                                 extra_words += 1;
                             }
-                            if matches!(dst, Operand::DirectMemory(_) | Operand::IndirectOffset { .. }) {
+                            if matches!(
+                                dst,
+                                Operand::DirectMemory(_) | Operand::IndirectOffset { .. }
+                            ) {
                                 extra_words += 1;
                             }
                             self.current_address += 2 + (extra_words * 2);
                         }
                         Instruction::Cmp { src, .. } => {
-                            let is_immediate = matches!(src, Operand::Immediate(_) | Operand::Symbol(_));
+                            let is_immediate =
+                                matches!(src, Operand::Immediate(_) | Operand::Symbol(_));
                             if is_immediate {
                                 self.current_address += 4;
                             } else {
@@ -523,8 +893,8 @@ impl Assembler {
                         Instruction::Setf { .. } => {
                             self.current_address += 4; // Base opcode + 16-bit extension word
                         }
-                        Instruction::Jlt { .. } 
-                        | Instruction::Jgt { .. } 
+                        Instruction::Jlt { .. }
+                        | Instruction::Jgt { .. }
                         | Instruction::Jmp { .. } => {
                             self.current_address += 2;
                         }
@@ -540,8 +910,8 @@ impl Assembler {
                 }
                 Err(e) => {
                     return Err(AsmError::UnknownOpcode(
-                        format!("{} (Parse error: {:?})", trimmed, e), 
-                        line_num
+                        format!("{} (Parse error: {:?})", trimmed, e),
+                        line_num,
                     ));
                 }
             }
@@ -551,11 +921,10 @@ impl Assembler {
     }
 
     pub fn pass_two(&self, ast: &[Instruction]) -> Result<Vec<u8>, AsmError> {
-        encoder::generate_binary(ast, &self.symbol_table)
-            .map_err(|e| AsmError::Parse { 
-                line: 0, 
-                message: format!("Encoding/Symbol error: {:?}", e) 
-            })
+        encoder::generate_binary(ast, &self.symbol_table).map_err(|e| AsmError::Parse {
+            line: 0,
+            message: format!("Encoding/Symbol error: {:?}", e),
+        })
     }
 }
 
@@ -568,13 +937,13 @@ pub fn load_source_file(path: &Path) -> Result<Vec<String>, Box<dyn std::error::
 
     for raw_line in content.lines() {
         let trimmed = raw_line.trim();
-        
+
         // Check if the line is an include directive (e.g., .include "hardware.asm")
         if trimmed.to_lowercase().starts_with(".include") {
             if let Some(filename) = extract_quoted_filename(trimmed) {
                 let include_path = base_dir.join(filename);
                 println!("[DEBUG Include] Loading file: {:?}", include_path);
-                
+
                 // Recursively load the included file's lines
                 let nested_lines = load_source_file(&include_path)?;
                 resolved_lines.extend(nested_lines);
@@ -592,7 +961,9 @@ pub fn load_source_file(path: &Path) -> Result<Vec<String>, Box<dyn std::error::
 /// Helper to extract text inside double quotes (e.g., "hardware.asm")
 fn extract_quoted_filename(line: &str) -> Option<String> {
     if let (Some(start), Some(end)) = (line.find('"'), line.rfind('"')) {
-        if start < end { return Some(line[start + 1..end].to_string()); }
+        if start < end {
+            return Some(line[start + 1..end].to_string());
+        }
     }
     let (_, filename) = line.split_once(char::is_whitespace)?;
     let filename = filename.trim().split_whitespace().next()?.trim_matches('"');
@@ -606,7 +977,7 @@ fn main() -> Result<(), AsmError> {
     println!("Input file: {:?}", args.input);
 
     let input_path = Path::new(&args.input);
-    
+
     let lines = load_source_file(input_path).map_err(|e| AsmError::Parse {
         line: 0,
         message: format!("File include error: {}", e),
@@ -631,34 +1002,65 @@ fn main() -> Result<(), AsmError> {
     println!("Executing Pass 2 (Machine Code Generation)...");
     let binary_output = assembler.pass_two(&ast)?;
 
-    // Write primary binary output to disk
-    std::fs::write(&args.output, &binary_output)?;
-    println!(
-        "Successfully assembled {} bytes -> {:?}",
-        binary_output.len(),
-        args.output
-    );
+    if args.object_format {
+        let object = ObjectFile::from_assembler(input_path, &assembler, &ast, &binary_output);
+        let json = serde_json::to_vec_pretty(&object).map_err(|error| AsmError::Parse {
+            line: 0,
+            message: format!("Failed to serialize object file: {error}"),
+        })?;
+        std::fs::write(&args.output, json)?;
+        println!(
+            "Successfully emitted relocatable object {} bytes -> {:?}",
+            binary_output.len(),
+            args.output
+        );
+    } else {
+        std::fs::write(&args.output, &binary_output)?;
+        println!(
+            "Successfully assembled {} bytes -> {:?}",
+            binary_output.len(),
+            args.output
+        );
+    }
 
-    verify::verify_rom(&args.output, &ast, &assembler.symbol_table)
-        .map_err(|message| AsmError::Parse { line: 0, message })?;
+    if !args.object_format {
+        verify::verify_rom(&args.output, &ast, &assembler.symbol_table)
+            .map_err(|message| AsmError::Parse { line: 0, message })?;
+    }
 
     // Conditionally apply ROM interleaver based on CLI argument
-    if args.interleave_ways > 1 {
-        println!("Splitting binary for arcade hardware ({}-way interleave)...", args.interleave_ways);
-        interleaver::write_split_roms(&args.output, &binary_output, args.interleave_ways)
-            .map_err(|e| AsmError::Parse { line: 0, message: format!("Interleave error: {:?}", e) })?;
+    if !args.object_format && args.interleave_ways > 1 {
+        println!(
+            "Splitting binary for arcade hardware ({}-way interleave)...",
+            args.interleave_ways
+        );
+        interleaver::write_split_roms(&args.output, &binary_output, args.interleave_ways).map_err(
+            |e| AsmError::Parse {
+                line: 0,
+                message: format!("Interleave error: {:?}", e),
+            },
+        )?;
     } else {
         println!("Interleaving skipped (1-way mode).");
     }
 
     // Word-level hex dump + little-endian verification against the symbol table
     if args.dump {
-        let listing = dump::dump_listing(&ast, &binary_output, &assembler.symbol_table)
-            .map_err(|e| AsmError::Parse { line: 0, message: format!("Encode error: {:?}", e) })?;
+        let listing =
+            dump::dump_listing(&ast, &binary_output, &assembler.symbol_table).map_err(|e| {
+                AsmError::Parse {
+                    line: 0,
+                    message: format!("Encode error: {:?}", e),
+                }
+            })?;
         print!("{}", listing);
 
-        let checks = dump::verify(&ast, &binary_output, &assembler.symbol_table)
-            .map_err(|e| AsmError::Parse { line: 0, message: format!("Encode error: {:?}", e) })?;
+        let checks = dump::verify(&ast, &binary_output, &assembler.symbol_table).map_err(|e| {
+            AsmError::Parse {
+                line: 0,
+                message: format!("Encode error: {:?}", e),
+            }
+        })?;
 
         for (ok, msg) in &checks {
             println!("  [{}] {}", if *ok { "PASS" } else { "FAIL" }, msg);

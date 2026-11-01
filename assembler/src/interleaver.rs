@@ -24,7 +24,10 @@ pub fn split_binary(data: &[u8], ways: usize) -> Vec<Vec<u8>> {
 /// Helper function to write split ROM chunks to disk with custom suffixes
 pub fn write_split_roms(base_path: &Path, data: &[u8], ways: usize) -> Result<(), InterleaveError> {
     let chunks = split_binary(data, ways);
-    let stem = base_path.file_stem().and_then(|s| s.to_str()).unwrap_or("rom");
+    let stem = base_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("rom");
     let parent = base_path.parent().unwrap_or(Path::new("."));
 
     for (bank_idx, chunk) in chunks.iter().enumerate() {
@@ -39,7 +42,11 @@ pub fn write_split_roms(base_path: &Path, data: &[u8], ways: usize) -> Result<()
         let out_path = parent.join(file_name);
 
         fs::write(&out_path, chunk)?;
-        println!("Generated ROM chip file: {:?} ({} bytes)", out_path, chunk.len());
+        println!(
+            "Generated ROM chip file: {:?} ({} bytes)",
+            out_path,
+            chunk.len()
+        );
     }
 
     Ok(())

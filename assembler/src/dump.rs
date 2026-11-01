@@ -58,53 +58,104 @@ fn describe(instr: &ParsedInstruction) -> String {
         ParsedInstruction::Nop => "NOP".to_string(),
         ParsedInstruction::Inc { dst } => format!("INC {}", fmt_operand(dst)),
         ParsedInstruction::Dec { dst } => format!("DEC {}", fmt_operand(dst)),
-        ParsedInstruction::Movy { src, dst } => format!("MOVY {}, {}", fmt_operand(src), fmt_operand(dst)),
-        ParsedInstruction::Movx { src, dst } => format!("MOVX {}, {}", fmt_operand(src), fmt_operand(dst)),
-        ParsedInstruction::RotateLeft { src, dst } => format!("RL {}, {}", fmt_operand(src), fmt_operand(dst)),
-        ParsedInstruction::RotateRight { src, dst } => format!("RR {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::Movy { src, dst } => {
+            format!("MOVY {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
+        ParsedInstruction::Movx { src, dst } => {
+            format!("MOVX {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
+        ParsedInstruction::RotateLeft { src, dst } => {
+            format!("RL {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
+        ParsedInstruction::RotateRight { src, dst } => {
+            format!("RR {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
         ParsedInstruction::Label(l) => format!("{}:", l),
         ParsedInstruction::Equ { name, value } => format!(".equ {}, {}", name, value),
         ParsedInstruction::Directive { name, args } => format!("{} {}", name, args.join(", ")),
         ParsedInstruction::Move { src, dst, field } => {
             if let Some(f) = field {
-                format!("MOVE {}, {}, {}", fmt_operand(src), fmt_operand(dst), fmt_operand(f))
+                format!(
+                    "MOVE {}, {}, {}",
+                    fmt_operand(src),
+                    fmt_operand(dst),
+                    fmt_operand(f)
+                )
             } else {
                 format!("MOVE {}, {}", fmt_operand(src), fmt_operand(dst))
             }
         }
-        ParsedInstruction::Add { src, dst } => format!("ADD {}, {}", fmt_operand(src), fmt_operand(dst)),
-        ParsedInstruction::Sub { src, dst } => format!("SUB {}, {}", fmt_operand(src), fmt_operand(dst)),
-        ParsedInstruction::Sll { src, dst } => format!("SLL {}, {}", fmt_operand(src), fmt_operand(dst)),
-        ParsedInstruction::Srl { src, dst } => format!("SRL {}, {}", fmt_operand(src), fmt_operand(dst)),
-        ParsedInstruction::Sla { src, dst } => format!("SLA {}, {}", fmt_operand(src), fmt_operand(dst)),
-        ParsedInstruction::Sra { src, dst } => format!("SRA {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::Add { src, dst } => {
+            format!("ADD {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
+        ParsedInstruction::Sub { src, dst } => {
+            format!("SUB {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
+        ParsedInstruction::Sll { src, dst } => {
+            format!("SLL {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
+        ParsedInstruction::Srl { src, dst } => {
+            format!("SRL {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
+        ParsedInstruction::Sla { src, dst } => {
+            format!("SLA {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
+        ParsedInstruction::Sra { src, dst } => {
+            format!("SRA {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
         ParsedInstruction::Jr { label } => format!("JR {}", label),
         ParsedInstruction::Call { label } => format!("CALL {}", label),
         ParsedInstruction::Jeq { label } => format!("JEQ {}", label),
         ParsedInstruction::Jne { label } => format!("JNE {}", label),
-        ParsedInstruction::Cmp { src, dst } => format!("CMP {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::Cmp { src, dst } => {
+            format!("CMP {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
         ParsedInstruction::Jlt { target } => format!("JLT {}", target),
         ParsedInstruction::Jgt { target } => format!("JGT {}", target),
-        ParsedInstruction::MacroDef { name, params } => format!(".macro {} {}", name, params.join(", ")),
+        ParsedInstruction::MacroDef { name, params } => {
+            format!(".macro {} {}", name, params.join(", "))
+        }
         ParsedInstruction::MacroEnd => ".endm".to_string(),
-        ParsedInstruction::And { src, dst } => format!("AND {}, {}", fmt_operand(src), fmt_operand(dst)),
-        ParsedInstruction::Andn { src, dst } => format!("ANDN {}, {}", fmt_operand(src), fmt_operand(dst)),
-        ParsedInstruction::Or { src, dst } => format!("OR {}, {}", fmt_operand(src), fmt_operand(dst)),
-        ParsedInstruction::Xor { src, dst } => format!("XOR {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::And { src, dst } => {
+            format!("AND {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
+        ParsedInstruction::Andn { src, dst } => {
+            format!("ANDN {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
+        ParsedInstruction::Or { src, dst } => {
+            format!("OR {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
+        ParsedInstruction::Xor { src, dst } => {
+            format!("XOR {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
         ParsedInstruction::Jmp { target } => format!("JMP {}", fmt_operand(target)),
         ParsedInstruction::Rets => "RETS".to_string(),
-        ParsedInstruction::Usect { name, section, args } => format!(".usect {} {} {}", name, section, args.join(", ")),
+        ParsedInstruction::Usect {
+            name,
+            section,
+            args,
+        } => format!(".usect {} {} {}", name, section, args.join(", ")),
         ParsedInstruction::Trap { vector } => format!("TRAP {}", vector),
         ParsedInstruction::Not { dst } => format!("NOT {}", fmt_operand(dst)),
         ParsedInstruction::Fill { field } => format!("FILL {}", field).trim_end().to_string(),
-        ParsedInstruction::Movb { src, dst } => format!("MOVB {}, {}", fmt_operand(src), fmt_operand(dst)),
-        ParsedInstruction::Pixt { src, dst } => format!("PIXT {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::Movb { src, dst } => {
+            format!("MOVB {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
+        ParsedInstruction::Pixt { src, dst } => {
+            format!("PIXT {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
         ParsedInstruction::Dsjs { reg, target } => format!("DSJS {}, {}", fmt_operand(reg), target),
         ParsedInstruction::Calla { target } => format!("CALLA {}", fmt_operand(target)),
-        ParsedInstruction::Btst { src, dst } => format!("BTST {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::Btst { src, dst } => {
+            format!("BTST {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
         ParsedInstruction::Callr { label } => format!("CALLR {}", label),
-        ParsedInstruction::Movk { src, dst } => format!("MOVK {}, {}", fmt_operand(src), fmt_operand(dst)),
-        ParsedInstruction::Xor { src, dst } => format!("XORI {}, {}", fmt_operand(src), fmt_operand(dst)),
+        ParsedInstruction::Movk { src, dst } => {
+            format!("MOVK {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
+        ParsedInstruction::Xor { src, dst } => {
+            format!("XORI {}, {}", fmt_operand(src), fmt_operand(dst))
+        }
         ParsedInstruction::Exgpc(reg) => {
             let reg_str = match reg {
                 Register::A(n) => format!("A{}", n),
@@ -113,16 +164,20 @@ fn describe(instr: &ParsedInstruction) -> String {
             format!("EXGPC {}", reg_str)
         }
         ParsedInstruction::Setf { size, sign, offset } => format!(
-            "SETF {}, {}, {}", 
-            fmt_operand(size), 
-            fmt_operand(sign), 
+            "SETF {}, {}, {}",
+            fmt_operand(size),
+            fmt_operand(sign),
             fmt_operand(offset)
         ),
     }
 }
 
 /// Word-level hex listing of the generated binary, in lockstep with the AST.
-pub fn dump_listing(ast: &[ParsedInstruction], binary: &[u8], symbols: &SymbolTable) -> Result<String, EncodeError> {
+pub fn dump_listing(
+    ast: &[ParsedInstruction],
+    binary: &[u8],
+    symbols: &SymbolTable,
+) -> Result<String, EncodeError> {
     let mut out = String::new();
     let mut addr: u32 = 0;
 
@@ -134,7 +189,10 @@ pub fn dump_listing(ast: &[ParsedInstruction], binary: &[u8], symbols: &SymbolTa
         let slice = &binary[addr as usize..addr as usize + encoded.len()];
 
         let bytes: Vec<String> = slice.iter().map(|b| format!("{:02X}", b)).collect();
-        let words: Vec<String> = slice.chunks(2).map(|w| format!("{:04X}", word(w))).collect();
+        let words: Vec<String> = slice
+            .chunks(2)
+            .map(|w| format!("{:04X}", word(w)))
+            .collect();
 
         out.push_str(&format!(
             "  {:04X}   {:<15}  {:<15}  {}\n",
@@ -152,7 +210,11 @@ pub fn dump_listing(ast: &[ParsedInstruction], binary: &[u8], symbols: &SymbolTa
 }
 
 /// Re-decodes the emitted binary and checks it against the symbol table.
-pub fn verify(ast: &[ParsedInstruction], binary: &[u8], symbols: &SymbolTable) -> Result<Vec<(bool, String)>, EncodeError> {
+pub fn verify(
+    ast: &[ParsedInstruction],
+    binary: &[u8],
+    symbols: &SymbolTable,
+) -> Result<Vec<(bool, String)>, EncodeError> {
     let mut results: Vec<(bool, String)> = Vec::new();
     let mut addr: u32 = 0;
 
@@ -190,47 +252,47 @@ pub fn verify(ast: &[ParsedInstruction], binary: &[u8], symbols: &SymbolTable) -
                 ));
             }
             ParsedInstruction::Move { src, dst, field } => {
-            if matches!(src, Operand::Immediate(_) | Operand::Symbol(_)) {
-                let expected = crate::encoder::resolve_immediate(src, symbols)?;
-                // If a field specifier extension word is present, shift the immediate operand word offset
-                let offset = if field.is_some() { 4 } else { 2 };
-                let decoded = word(&slice[offset..offset + 2]) as i32;
-                results.push((
-                    decoded == expected,
-                    format!(
-                        "{} @ {:04X}: operand word {:04X} = {}, expected {}",
-                        describe(instr),
-                        addr,
-                        word(&slice[offset..offset + 2]),
-                        decoded,
-                        expected
-                    ),
-                ));
+                if matches!(src, Operand::Immediate(_) | Operand::Symbol(_)) {
+                    let expected = crate::encoder::resolve_immediate(src, symbols)?;
+                    // If a field specifier extension word is present, shift the immediate operand word offset
+                    let offset = if field.is_some() { 4 } else { 2 };
+                    let decoded = word(&slice[offset..offset + 2]) as i32;
+                    results.push((
+                        decoded == expected,
+                        format!(
+                            "{} @ {:04X}: operand word {:04X} = {}, expected {}",
+                            describe(instr),
+                            addr,
+                            word(&slice[offset..offset + 2]),
+                            decoded,
+                            expected
+                        ),
+                    ));
+                }
+                let _ = (dst, field);
             }
-            let _ = (dst, field);
-        }
-        ParsedInstruction::Add { src, dst }
-        | ParsedInstruction::Sub { src, dst }
-        | ParsedInstruction::Sll { src, dst }
-        | ParsedInstruction::Srl { src, dst } => {
-            if matches!(src, Operand::Immediate(_) | Operand::Symbol(_)) {
-                let expected = crate::encoder::resolve_immediate(src, symbols)?;
-                let decoded = word(&slice[2..4]) as i32;
-                results.push((
-                    decoded == expected,
-                    format!(
-                        "{} @ {:04X}: operand word {:04X} = {}, expected {}",
-                        describe(instr),
-                        addr,
-                        word(&slice[2..4]),
-                        decoded,
-                        expected
-                    ),
-                ));
+            ParsedInstruction::Add { src, dst }
+            | ParsedInstruction::Sub { src, dst }
+            | ParsedInstruction::Sll { src, dst }
+            | ParsedInstruction::Srl { src, dst } => {
+                if matches!(src, Operand::Immediate(_) | Operand::Symbol(_)) {
+                    let expected = crate::encoder::resolve_immediate(src, symbols)?;
+                    let decoded = word(&slice[2..4]) as i32;
+                    results.push((
+                        decoded == expected,
+                        format!(
+                            "{} @ {:04X}: operand word {:04X} = {}, expected {}",
+                            describe(instr),
+                            addr,
+                            word(&slice[2..4]),
+                            decoded,
+                            expected
+                        ),
+                    ));
+                }
+                let _ = dst;
             }
-            let _ = dst;
-        }
-        ParsedInstruction::Directive { name, args } => {
+            ParsedInstruction::Directive { name, args } => {
                 if name.eq_ignore_ascii_case(".WORD") {
                     for (i, arg) in args.iter().enumerate() {
                         let w = word(&slice[i * 2..i * 2 + 2]);
@@ -264,7 +326,11 @@ pub fn verify(ast: &[ParsedInstruction], binary: &[u8], symbols: &SymbolTable) -
 
     results.push((
         addr as usize == binary.len(),
-        format!("pass-1 address {:04X} matches binary length {}", addr, binary.len()),
+        format!(
+            "pass-1 address {:04X} matches binary length {}",
+            addr,
+            binary.len()
+        ),
     ));
 
     Ok(results)

@@ -1,4 +1,4 @@
-﻿use std::fs;
+use std::fs;
 use std::path::Path;
 
 use crate::encoder;
@@ -11,8 +11,8 @@ pub fn verify_rom<P: AsRef<Path>>(
     ast: &[ParsedInstruction],
     symbols: &SymbolTable,
 ) -> Result<(), String> {
-    let bytes = fs::read(bin_path)
-        .map_err(|error| format!("failed to read output binary: {}", error))?;
+    let bytes =
+        fs::read(bin_path).map_err(|error| format!("failed to read output binary: {}", error))?;
 
     println!(
         "\n[Verifier] Starting round-trip verification of output binary ({} bytes)...",
@@ -21,8 +21,12 @@ pub fn verify_rom<P: AsRef<Path>>(
 
     let mut pc = 0usize;
     for (line_idx, instr) in ast.iter().enumerate() {
-        let encoded = encoder::encode_instruction(instr, pc as u32, symbols)
-            .map_err(|error| format!("failed to encode instruction #{} {:?}: {:?}", line_idx, instr, error))?;
+        let encoded = encoder::encode_instruction(instr, pc as u32, symbols).map_err(|error| {
+            format!(
+                "failed to encode instruction #{} {:?}: {:?}",
+                line_idx, instr, error
+            )
+        })?;
 
         let end = pc
             .checked_add(encoded.len())
