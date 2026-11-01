@@ -280,6 +280,7 @@ pub fn parse_line(input: &str) -> IResult<&str, ParsedInstruction> {
             // parse_usect,
             parse_addi,
             parse_addk,
+            parse_subk,
             parse_cmpi,
             parse_clr,
             parse_calli,
@@ -723,6 +724,21 @@ pub fn parse_addi(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, dst) = parse_operand(input)?;
 
     Ok((input, ParsedInstruction::Add { src, dst }))
+}
+
+/// Parse SUBK instruction (e.g., "SUBK 1, A0" -> translates to Sub with Immediate).
+pub fn parse_subk(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("SUBK")(input)?;
+    let (input, _) = multispace1(input)?;
+
+    let (input, val) = parse_number(input)?;
+    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
+    let (input, dst) = parse_operand(input)?;
+
+    Ok((input, ParsedInstruction::Sub {
+        src: Operand::Immediate(val),
+        dst,
+    }))
 }
 
 /// Parse ADDK instruction (e.g., "ADDK 1, A0" -> translates to Add with Immediate)
