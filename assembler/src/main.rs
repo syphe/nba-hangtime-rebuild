@@ -190,6 +190,10 @@ impl ObjectFile {
                     Operand::Symbol(name) => Some(name.as_str()),
                     _ => None,
                 },
+                Instruction::Calla { target } => match target {
+                    Operand::Symbol(name) => Some(name.as_str()),
+                    _ => None,
+                },
                 _ => None,
             };
             if let Some(symbol) = symbol {
@@ -199,12 +203,17 @@ impl ObjectFile {
                     || upper == "SP"
                     || upper == "FP";
                 if !is_register {
+                    let kind = match &instruction {
+                        Instruction::Calla { .. } => "absolute32",
+                        _ => "tms34010-relative",
+                    };
                     fixups.push(ObjectFixup {
-                        offset: section_offsets.get(&current_section).copied().unwrap_or(0),
-                        object_offset: offset,
+                        offset: section_offsets.get(&current_section).copied().unwrap_or(0)
+                            + if kind == "absolute32" { 2 } else { 0 },
+                        object_offset: offset + if kind == "absolute32" { 2 } else { 0 },
                         section: current_section.clone(),
                         symbol: symbol.to_string(),
-                        kind: "tms34010-relative".to_string(),
+                        kind: kind.to_string(),
                     });
                 }
             }

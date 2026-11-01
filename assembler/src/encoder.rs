@@ -647,7 +647,8 @@ pub fn encode_instruction(
             let val = resolve_immediate(target, symbols)?;
             let opcode: u16 = 0xEB00; // Base opcode for absolute call on TMS34010
             bytes.extend_from_slice(&opcode.to_le_bytes());
-            bytes.extend_from_slice(&(val as u16).to_le_bytes());
+            bytes.extend_from_slice(&(val as u32 as u16).to_le_bytes());
+            bytes.extend_from_slice(&((val as u32 >> 16) as u16).to_le_bytes());
         }
         ParsedInstruction::Btst { src, dst } => {
             match (src, dst) {

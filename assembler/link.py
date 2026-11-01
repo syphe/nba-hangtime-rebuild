@@ -117,6 +117,12 @@ def main():
                 continue
             source = section_addresses[section] + fixup["offset"]
             target = symbols[fixup["symbol"].lower()]
+            if fixup.get("kind") == "absolute32":
+                start = source - ROM_BASE
+                if start < 0 or start + 4 > len(rom):
+                    raise ValueError(f"{path}: absolute fixup is outside the ROM image")
+                rom[start:start + 4] = struct.pack("<I", target)
+                continue
             relative = (target - (source + 2)) // 2
             if relative < -128 or relative > 127:
                 unsupported_relative[
