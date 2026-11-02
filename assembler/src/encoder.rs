@@ -89,6 +89,35 @@ pub fn encode_instruction(
             // .usect allocates uninitialized RAM space; no ROM bytes emitted
         }
         ParsedInstruction::Directive { name, args } => {
+            if name.eq_ignore_ascii_case("MMTM") || name.eq_ignore_ascii_case("MMFM") {
+                fn register(text: &str) -> Result<Register, EncodeError> {
+                    match crate::parser::parse_register(text.trim()) {
+                        Ok(("", register)) => Ok(register),
+                        _ => Err(EncodeError::InvalidOperand),
+                    }
+                }
+                if args.len() < 2 { return Err(EncodeError::InvalidOperand); }
+                let base = register(&args[0])?;
+                let mut file = encode_register(&base) & 0x10;
+                let mut mask = 0u16;
+                let store = name.eq_ignore_ascii_case("MMTM");
+                let mut selected_file = if encode_register(&base) & 15 == 15 { None } else { Some(file) };
+                for arg in &args[1..] {
+                    let reg = register(arg)?;
+                    let encoded = encode_register(&reg);
+                    if encoded & 15 != 15 {
+                        if selected_file.is_some_and(|existing| existing != encoded & 0x10) {
+                            return Err(EncodeError::InvalidOperand);
+                        }
+                        file = encoded & 0x10;
+                        selected_file = Some(file);
+                    }
+                    mask |= 1 << if store { 15 - (encoded & 15) } else { encoded & 15 };
+                }
+                let opcode = (if store { 0x0980 } else { 0x09A0 }) | file as u16 | (encode_register(&base) as u16 & 15);
+                bytes.extend_from_slice(&opcode.to_le_bytes());
+                bytes.extend_from_slice(&mask.to_le_bytes());
+            }
             if name.eq_ignore_ascii_case(".STRING") {
                 for arg in args {
                     if let Some(text) = arg.strip_prefix('"').and_then(|text| text.strip_suffix('"'))

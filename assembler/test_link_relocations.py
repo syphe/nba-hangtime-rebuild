@@ -40,8 +40,11 @@ class RelativeRelocations(unittest.TestCase):
             symbols=[dict(name='next', section='.text', section_offset=6, kind='symbol')],
             fixups=[dict(section='.text', offset=0, symbol='next', kind='tms34010-relative'),
                     dict(section='.text', offset=2, symbol='next', kind='tms34010-dsjs5')])
-        with tempfile.TemporaryDirectory() as temporary:
+        build = Path(__file__).resolve().parent / 'build'
+        build.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=build) as temporary:
             root = Path(temporary)
+            self.assertTrue(root.resolve().is_relative_to(build.resolve()))
             (root / 'test.OBJ').write_text(json.dumps(obj))
             subprocess.run([sys.executable, str(Path(__file__).with_name('link.py')),
                             str(root / 'test.OBJ'), '--output', str(root / 'ROM.bin')],

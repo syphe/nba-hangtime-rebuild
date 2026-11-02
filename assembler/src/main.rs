@@ -475,6 +475,7 @@ pub struct Assembler {
     pub macro_table: HashMap<String, MacroTemplate>,
     current_address: u32,
     assignment_aliases: HashMap<String, String>,
+    object_format: bool,
 }
 
 #[cfg(test)]
@@ -514,7 +515,7 @@ mod loop_expression_tests {
         assert_eq!(object.fixups[0].kind, "tms34010-relative16");
         assert_eq!(object.fixups[0].offset, 2);
         for (source, expected) in [("call a2", 0x0922u16), ("call b2", 0x0932),
-                                   ("jmp a2", 0x0162), ("reti", 0x0940)] {
+                                   ("jmp a2", 0x0162), ("jump b2", 0x0172), ("reti", 0x0940)] {
             let mut assembler = Assembler::new();
             let ast = assembler.pass_one(&[source]).unwrap();
             assert_eq!(assembler.pass_two(&ast).unwrap(), expected.to_le_bytes(), "{source}");
@@ -561,6 +562,10 @@ mod loop_expression_tests {
             ("trap 0", vec![0x0900]),
             ("trap 31", vec![0x091f]),
             ("rets", vec![0x0960]),
+            ("mmtm sp,a0,a2", vec![0x098f, 0xa000]),
+            ("mmfm sp,a0,a2", vec![0x09af, 0x0005]),
+            ("mmtm sp,b0,b3", vec![0x099f, 0x9000]),
+            ("mmfm sp,b0,b3", vec![0x09bf, 0x0009]),
             ("movi 12345678h,a3", vec![0x09e3, 0x5678, 0x1234]),
             ("movi 12345678h,b3", vec![0x09f3, 0x5678, 0x1234]),
             ("clr a1", vec![0x5621]),
@@ -588,6 +593,17 @@ mod loop_expression_tests {
             let ast = assembler.pass_one(&[source]).unwrap();
             assert!(assembler.pass_two(&ast).is_err(), "{source}");
         }
+        let mut assembler = Assembler::new();
+        assembler.object_format = true;
+        let source = ".ref outside\nstart\n".to_string() + &"call outside\n".repeat(11) + "dsjs a2,start\nrets";
+        let ast = assembler.pass_one(&source.lines().collect::<Vec<_>>()).unwrap();
+        let binary = assembler.pass_two(&ast).unwrap();
+        assert_eq!(binary.len(), 72);
+        assert_eq!(&binary[66..70], &[0x82, 0x0d, 0xdd, 0xff]);
+        let object = ObjectFile::from_assembler(Path::new("test.asm"), &assembler, &ast, &binary);
+        assert_eq!(object.fixups[0].kind, "absolute32");
+        assert_eq!(object.fixups[11].kind, "tms34010-relative16");
+        assert_eq!(object.fixups[11].offset, 68);
     }
 
     #[test]
@@ -672,6 +688,7 @@ impl Assembler {
             macro_table: HashMap::new(),
             current_address: 0,
             assignment_aliases: HashMap::new(),
+            object_format: false,
         }
     }
 
@@ -1001,6 +1018,7 @@ impl Assembler {
                             | "CMP"
                             | "CMPI"
                             | "JMP"
+                            | "JUMP"
                             | "NOP"
                             | "RETS"
                             | "RETI"
@@ -1106,6 +1124,7 @@ impl Assembler {
                                     | "CMP"
                                     | "CMPI"
                                     | "JMP"
+                            | "JUMP"
                                     | "NOP"
                                     | "RETS"
                             | "RETI"
@@ -1431,6 +1450,22 @@ impl Assembler {
 
         // Re-layout after labels and equates are known. Branches that promote to
         // the two-word form move later labels, so repeat until addresses settle.
+        // Reserve external transfers before layout as well as during object
+        // serialization; otherwise nearby DSJS/branches see incorrect distances.
+        if self.object_format {
+            let transfers: Vec<_> = ast.iter().map(|instruction| {
+                external_absolute_transfer(instruction, &ast).map(|(opcode, target)| (opcode, target.to_string()))
+            }).collect();
+            for (instruction, transfer) in ast.iter_mut().zip(transfers) {
+                if let Some((opcode, target)) = transfer {
+                    *instruction = if opcode == 0x0D40 {
+                        Instruction::Calla { target: Operand::Symbol(target) }
+                    } else {
+                        Instruction::Jacc { condition: ((opcode >> 8) & 15) as u8, target }
+                    };
+                }
+            }
+        }
         let mut latest_equates = HashMap::<String, String>::new();
         for (name, expression) in pending_equates.drain(..) {
             latest_equates.insert(name, expression);
@@ -1443,7 +1478,7 @@ impl Assembler {
         let branch_count = ast.iter().filter(|instruction| matches!(
             instruction,
             Instruction::Jr { .. } | Instruction::Jrcc { .. } | Instruction::Jeq { .. }
-                | Instruction::Jne { .. } | Instruction::Jlt { .. } | Instruction::Jgt { .. }
+                | Instruction::Jne { .. } | Instruction::Jlt { .. } | Instruction::Jgt { .. } | Instruction::Dsjs { .. }
         )).count();
         let max_layout_passes = branch_count + 3;
         let mut layout_converged = false;
@@ -1453,6 +1488,14 @@ impl Assembler {
             }).collect();
             let mut address = 0u32;
             for instruction in &mut ast {
+                if let Instruction::Dsjs { target, short, .. } = instruction {
+                    if *short && target != "$" {
+                        if let Some(target_address) = self.symbol_table.get(target).or_else(|| self.symbol_table.get_ignore_case(target)) {
+                            let delta = *target_address as i64 - (address + 2) as i64;
+                            if !(-31..=31).contains(&(delta / 2)) { *short = false; }
+                        }
+                    }
+                }
                 match instruction {
                     Instruction::Label(name) => {
                         self.symbol_table.insert(name.clone(), address);
@@ -1600,6 +1643,7 @@ fn main() -> Result<(), AsmError> {
     let mut assembler = Assembler::new();
 
     // Pass 1: Parse & build symbol map
+    assembler.object_format = args.object_format;
     println!("Executing Pass 1 (Parsing & Symbol Resolution)...");
 
     // Convert Vec<String> into a vector of &str references

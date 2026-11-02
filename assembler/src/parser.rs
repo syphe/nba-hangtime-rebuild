@@ -1045,7 +1045,7 @@ pub fn parse_xor(input: &str) -> IResult<&str, ParsedInstruction> {
 pub fn parse_jmp(input: &str) -> IResult<&str, ParsedInstruction> {
     map(
         tuple((
-            tag_no_case("jmp"),
+            alt((tag_no_case("jump"), tag_no_case("jmp"))),
             space1,
             alt((
                 parse_operand,
@@ -1260,12 +1260,12 @@ pub fn parse_trap(input: &str) -> IResult<&str, ParsedInstruction> {
 
 pub fn parse_mmfm(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = tag_no_case("MMFM")(input)?;
-    let (input, _) = take_while(|c: char| c != '\n' && c != '\r')(input)?;
+    let (input, operands) = take_while(|c: char| c != '\n' && c != '\r')(input)?;
     Ok((
         input,
         ParsedInstruction::Directive {
             name: "MMFM".to_string(),
-            args: Vec::new(),
+            args: split_asm_operands(operands),
         },
     ))
 }
