@@ -167,6 +167,7 @@ struct ObjectFile {
     text_address: u32,
     text: String,
     sections: Vec<ObjectSection>,
+    bss_size_bits: u32,
     symbols: Vec<ObjectSymbol>,
     fixups: Vec<ObjectFixup>,
 }
@@ -184,9 +185,20 @@ impl ObjectFile {
         let mut symbol_section_offsets = HashMap::<String, u32>::new();
         let mut label_section = ".text".to_string();
         let mut section_offsets = HashMap::<String, u32>::new();
+        let mut bss_size_bits = 0u32;
+        let mut bss_symbols = Vec::new();
         for instruction in ast {
             if let Instruction::Directive { name, args } = instruction {
                 let directive = name.trim_start_matches('.').to_ascii_lowercase();
+                if directive == "bss" && args.len() >= 2 {
+                    let symbol = args[0].trim().to_string();
+                    let size_bits = assembler.eval_arithmetic(&args[1]).max(0) as u32;
+                    symbol_sections.insert(symbol.clone(), ".bss".to_string());
+                    symbol_section_offsets.insert(symbol, bss_size_bits);
+                    bss_symbols.push((args[0].trim().to_string(), bss_size_bits));
+                    bss_size_bits = bss_size_bits.saturating_add(size_bits);
+                    continue;
+                }
                 if directive == "sect" {
                     if let Some(section) = args.first() {
                         label_section = section.trim_matches(|c| c == '"' || c == '\'').to_string();
@@ -233,6 +245,17 @@ impl ObjectFile {
                 kind: "symbol".to_string(),
             })
             .collect();
+        for (name, section_offset) in bss_symbols {
+            if !symbols.iter().any(|symbol| symbol.name.eq_ignore_ascii_case(&name)) {
+                symbols.push(ObjectSymbol {
+                    name,
+                    address: 0,
+                    section: ".bss".to_string(),
+                    section_offset,
+                    kind: "symbol".to_string(),
+                });
+            }
+        }
         symbols.sort_by(|a, b| a.name.cmp(&b.name));
 
         let mut fixups = Vec::new();
@@ -372,6 +395,7 @@ impl ObjectFile {
             text_address: 0,
             text: STANDARD.encode(binary),
             sections,
+            bss_size_bits,
             symbols,
             fixups,
         }
@@ -480,11 +504,27 @@ impl Assembler {
         {
             return i32::from_str_radix(hex, 16).unwrap_or(0);
         }
+        if let Some(hex) = expression.strip_suffix('h').or_else(|| expression.strip_suffix('H')) {
+            if !hex.is_empty() && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                return i32::from_str_radix(hex, 16).unwrap_or(0);
+            }
+        }
         if let Some((left, right)) = expression.split_once('+') {
             return self.eval_arithmetic(left.trim()) + self.eval_arithmetic(right.trim());
         }
         if let Some((left, right)) = expression.split_once('-') {
             return self.eval_arithmetic(left.trim()) - self.eval_arithmetic(right.trim());
+        }
+        if let Some((left, right)) = expression.split_once('*') {
+            return self.eval_arithmetic(left.trim()) * self.eval_arithmetic(right.trim());
+        }
+        if let Some((left, right)) = expression.split_once('/') {
+            let divisor = self.eval_arithmetic(right.trim());
+            return if divisor == 0 {
+                0
+            } else {
+                self.eval_arithmetic(left.trim()) / divisor
+            };
         }
         if let Some((left, right)) = expression.split_once('|') {
             return self.eval_arithmetic(left.trim()) | self.eval_arithmetic(right.trim());
@@ -670,7 +710,15 @@ impl Assembler {
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
             if !parts.is_empty() {
                 let potential_macro_name = parts[0].to_uppercase();
-                if let Some(macro_template) = self.macro_table.get(&potential_macro_name).cloned() {
+                if let Some(macro_template) = self
+                    .macro_table
+                    .get(&potential_macro_name)
+                    .cloned()
+                    .filter(|template| {
+                        template.params.is_empty()
+                            || !trimmed[parts[0].len()..].trim().is_empty()
+                    })
+                {
                     let arg_str = trimmed[parts[0].len()..].trim();
                     let args: Vec<String> = arg_str
                         .split(',')
@@ -811,7 +859,9 @@ impl Assembler {
                             | "LINE"
                     );
                     let is_directive = first_word.starts_with('.');
-                    let is_macro = self.macro_table.contains_key(&upper_first);
+                    let is_macro = self.macro_table.get(&upper_first).is_some_and(|template| {
+                        template.params.is_empty() || parts.len() > 1
+                    });
 
                     if upper_first == "NOP"
                         && parts.get(1).is_some_and(|word| matches!(word.to_ascii_uppercase().as_str(), "DSJ" | "DSJS"))
@@ -886,6 +936,7 @@ impl Assembler {
                                     | "JRGE"
                                     | "JRHS"
                                     | "JRLO"
+                                    | "JRNV"
                                     | "JRZ"
                                     | "JRN"
                                     | "JRNZ"

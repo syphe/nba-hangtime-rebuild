@@ -768,11 +768,24 @@ pub fn parse_equ(input: &str) -> IResult<&str, ParsedInstruction> {
 // Enhanced numeric & coordinate literal parser
 pub fn parse_expression_value(directive: &str, symbols: &std::collections::HashMap<String, u32>) -> i32 {
     let upper = directive.to_ascii_uppercase();
-    let marker = upper.find(".EQU ").or_else(|| upper.find(" EQU ")).or_else(|| upper.find(".SET ")).or_else(|| upper.find(" SET "));
-    let expression = marker.map(|index| {
-        let tail = &upper[index..];
-        tail.split_once(' ').map(|(_, value)| value).unwrap_or("")
-    }).unwrap_or("");
+    let marker = upper.split_whitespace().scan(0usize, |offset, token| {
+        let start = upper[*offset..].find(token).map(|relative| *offset + relative)?;
+        *offset = start + token.len();
+        Some((token, start, *offset))
+    }).find_map(|(token, start, end)| {
+        matches!(token, ".EQU" | "EQU" | ".SET" | "SET")
+            .then_some((upper[..start].trim().is_empty(), end))
+    });
+    let expression = marker
+        .map(|(directive_first, end)| {
+            let remainder = upper[end..].trim();
+            if directive_first {
+                remainder.split_once(char::is_whitespace).map(|(_, expression)| expression.trim()).unwrap_or("")
+            } else {
+                remainder
+            }
+        })
+        .unwrap_or("");
 
     fn value_expr(input: &str, symbols: &std::collections::HashMap<String, u32>, position: &mut usize) -> i32 {
         fn primary(input: &str, symbols: &std::collections::HashMap<String, u32>, position: &mut usize) -> i32 {
@@ -798,7 +811,27 @@ pub fn parse_expression_value(directive: &str, symbols: &std::collections::HashM
         loop {
             while input.as_bytes().get(*position).is_some_and(|c| c.is_ascii_whitespace()) { *position += 1; }
             let op = input.as_bytes().get(*position).copied();
-            match op { Some(b'*') => { *position += 1; value *= primary(input, symbols, position); }, Some(b'/') => { *position += 1; value /= primary(input, symbols, position).max(1); }, Some(b'+') | Some(b'-') => { let op=input.as_bytes()[*position] as char; *position += 1; let rhs=primary(input,symbols,position); value += if op=='+' {rhs} else {-rhs}; while input.as_bytes().get(*position).is_some_and(|c| c.is_ascii_whitespace()) {*position +=1;} continue; }, _ => break }
+            match op {
+                Some(b'*') => {
+                    *position += 1;
+                    value = value.wrapping_mul(primary(input, symbols, position));
+                }
+                Some(b'/') => {
+                    *position += 1;
+                    value = value.wrapping_div(primary(input, symbols, position).max(1));
+                }
+                Some(b'+') | Some(b'-') => {
+                    let op = input.as_bytes()[*position] as char;
+                    *position += 1;
+                    let rhs = primary(input, symbols, position);
+                    value = if op == '+' { value.wrapping_add(rhs) } else { value.wrapping_sub(rhs) };
+                    while input.as_bytes().get(*position).is_some_and(|c| c.is_ascii_whitespace()) {
+                        *position += 1;
+                    }
+                    continue;
+                }
+                _ => break,
+            }
         }
         value
     }

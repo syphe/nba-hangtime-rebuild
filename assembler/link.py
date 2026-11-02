@@ -138,8 +138,12 @@ def compare_layout(objects, map_path: Path):
         print(f"  per-object size mismatches: {len(mismatches)} / {sum(1 for _, section in inputs if section == name)}")
         for obj_name, expected_size, observed_size in mismatches[:12]:
             print(f"  {obj_name}: map=0x{expected_size:X}, object={None if observed_size is None else f'0x{observed_size:X}'}")
-    bss_objects = sum(1 for _, obj in objects if any(section_name(s["name"]) == "bss" for s in obj.get("sections", [])))
-    print(f"MAP .bss: legacy=0x{totals.get('.bss', 0):X} bits; object files with BSS payload metadata={bss_objects}/{len(objects)} (allocation sizes remain unrepresented)")
+    bss_objects = sum(1 for _, obj in objects if obj.get("bss_size_bits", 0) > 0)
+    bss_bits = sum(obj.get("bss_size_bits", 0) for _, obj in objects)
+    print(
+        f"MAP .bss: legacy=0x{totals.get('.bss', 0):X} bits, "
+        f"objects=0x{bss_bits:X} bits; allocation metadata={bss_objects}/{len(objects)}"
+    )
 
 
 def compare_coff(path: Path, legacy_path: Path):
@@ -167,7 +171,13 @@ def resolve_expression(expression: str, symbols: dict[str, int], signed_constant
         lambda match: f"(({match.group(2).strip()})*0x10000+({match.group(1).strip()}))",
         text,
     )
+    text = re.sub(r"'([^'\\])'", lambda match: str(ord(match.group(1))), text)
     text = text.replace("$", "0x")
+    text = re.sub(
+        r"(?<![A-Za-z0-9_])([01]+)[bB](?![A-Za-z0-9_])",
+        lambda match: str(int(match.group(1), 2)),
+        text,
+    )
     exact_symbol = symbols.get(text.lower())
     if exact_symbol is not None:
         return exact_symbol
@@ -176,7 +186,17 @@ def resolve_expression(expression: str, symbols: dict[str, int], signed_constant
         token = match.group(0)
         return str(int(token[:-1], 16))
 
-    text = re.sub(r"(?<![A-Za-z0-9_])[0-9A-Fa-f]+H", legacy_hex, text)
+    text = re.sub(
+        r"(?<![A-Za-z0-9_])[0-9A-Fa-f]+H(?![A-Za-z0-9_])",
+        legacy_hex,
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"(?<![A-Za-z0-9_])0+([0-9]+)(?![A-Za-z0-9_])",
+        lambda match: str(int(match.group(0), 10)),
+        text,
+    )
 
     symbol_names = sorted(symbols, key=len, reverse=True)
     if symbol_names:
@@ -258,6 +278,7 @@ def main():
         raise ValueError("ROM base and length must be byte aligned")
     rom_length_bytes = rom_length_bits // 8
     text_cursor = rom_base
+    bss_cursor = 0x010020A0
     symbols = {}
     symbol_kinds = {}
     placements = []
@@ -300,6 +321,8 @@ def main():
                 data_cursor += len(data) * 8
             else:
                 section_addresses[name] = non_rom_origins.get(section["name"].lower(), 0)
+        section_addresses[".bss"] = bss_cursor
+        bss_cursor += obj.get("bss_size_bits", 0)
 
         placements.append((path, obj, section_addresses))
         for symbol in obj.get("symbols", []):
@@ -307,7 +330,7 @@ def main():
             name = symbol["name"].lower()
             address = None
             if section in section_addresses:
-                address = section_addresses[section] + symbol.get("section_offset", 0) * 8
+                address = section_addresses[section] + symbol.get("section_offset", 0) * (1 if section == ".bss" else 8)
             elif symbol.get("section") == "" and symbol.get("kind") == "symbol":
                 address = symbol.get("address", 0)
             if address is None:
@@ -332,6 +355,24 @@ def main():
             elif section == "" and previous_kind == "section":
                 symbols[name] = address
                 symbol_kinds[name] = "absolute"
+
+    # Hash-prefixed equates are valid assembler names, but expression operands
+    # conventionally omit the prefix. Keep the original and add a lookup alias.
+    for _, obj, addresses in placements:
+        for symbol in obj.get("symbols", []):
+            name = symbol["name"].lower()
+            if not name.startswith("#"):
+                continue
+            section = section_name(symbol.get("section", "")) if symbol.get("section") else ""
+            if section in addresses:
+                value = addresses[section] + symbol.get("section_offset", 0) * (1 if section == ".bss" else 8)
+            elif not section and symbol.get("kind") == "symbol":
+                value = symbol.get("address", 0)
+            else:
+                continue
+            alias = name[1:]
+            symbols.setdefault(alias, value)
+            symbol_kinds.setdefault(alias, symbol_kinds.get(name, "absolute"))
 
     rom = bytearray([FILL]) * rom_length_bytes
 
@@ -369,7 +410,7 @@ def main():
         for symbol in obj.get("symbols", []):
             section_name_value = section_name(symbol.get("section", "")) if symbol.get("section") else ""
             if section_name_value in section_addresses:
-                value = section_addresses[section_name_value] + symbol.get("section_offset", 0) * 8
+                value = section_addresses[section_name_value] + symbol.get("section_offset", 0) * (1 if section_name_value == ".bss" else 8)
             elif not symbol.get("section") and symbol.get("kind") == "symbol":
                 value = symbol.get("address", 0)
                 # .ref/.global declarations are represented as zero-valued,
@@ -380,6 +421,8 @@ def main():
             else:
                 continue
             object_symbols[symbol["name"].lower()] = value
+            if symbol["name"].startswith("#"):
+                object_symbols.setdefault(symbol["name"][1:].lower(), value)
         for fixup in obj.get("fixups", []):
             section = section_name(fixup["section"])
             if section not in ("text", "data") or section not in section_addresses:
