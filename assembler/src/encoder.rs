@@ -14,7 +14,7 @@ pub enum EncodeError {
     UndefinedSymbol(String),
     #[error("Invalid operand for instruction")]
     InvalidOperand,
-    #[error("Branch offset {offset} words out of 9-bit signed range (-256..255) for label '{label}' at {addr:04X}")]
+    #[error("Branch offset {offset} words out of 8-bit signed range (-128..127) for label '{label}' at {addr:04X}")]
     BranchOutOfRange {
         label: String,
         addr: u32,
@@ -90,10 +90,13 @@ pub fn encode_instruction(
             let offset_bytes = (target_addr as i32) - (pc_next as i32);
             let word_offset = (offset_bytes / 2) as i16;
 
-            // Keep incremental assembly moving for source files that use long
-            // conditional branches; encoding the low byte is preferable to
-            // rejecting the entire program until full long-branch support exists.
-            let word_offset = word_offset.clamp(-128, 127);
+            if !(-128..=127).contains(&word_offset) {
+                return Err(EncodeError::BranchOutOfRange {
+                    label: label.clone(),
+                    addr: current_addr,
+                    offset: word_offset as i32,
+                });
+            }
 
             let mut opcode: u16 = match instr {
                 ParsedInstruction::Jr { .. } => 0x6F00,
@@ -553,7 +556,13 @@ pub fn encode_instruction(
             let offset_bytes = target_addr as i32 - pc_next as i32;
             let word_offset = (offset_bytes / 2) as i16;
 
-            let word_offset = word_offset.clamp(-128, 127);
+            if !(-128..=127).contains(&word_offset) {
+                return Err(EncodeError::BranchOutOfRange {
+                    label: target.clone(),
+                    addr: current_addr,
+                    offset: word_offset as i32,
+                });
+            }
 
             let mut opcode: u16 = 0x6100;
             opcode |= (word_offset as u16) & 0x00FF;
@@ -570,7 +579,13 @@ pub fn encode_instruction(
             let offset_bytes = target_addr as i32 - pc_next as i32;
             let word_offset = (offset_bytes / 2) as i16;
 
-            let word_offset = word_offset.clamp(-128, 127);
+            if !(-128..=127).contains(&word_offset) {
+                return Err(EncodeError::BranchOutOfRange {
+                    label: target.clone(),
+                    addr: current_addr,
+                    offset: word_offset as i32,
+                });
+            }
 
             let mut opcode: u16 = 0x6200;
             opcode |= (word_offset as u16) & 0x00FF;
