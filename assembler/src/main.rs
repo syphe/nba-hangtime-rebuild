@@ -25,6 +25,7 @@ fn substitute_macro_parameters(
             if let Some((end, _)) = line[start + 1..].char_indices().find(|(_, c)| *c == ':') {
                 let name_end = start + 1 + end;
                 let name = &line[start + 1..name_end];
+                let name = name.strip_suffix(".S").unwrap_or(name);
                 if let Some(index) = params.iter().position(|param| param == name) {
                     if let Some(arg) = args.get(index) {
                         output.push_str(arg);
@@ -50,6 +51,13 @@ fn substitute_macro_parameters(
             if let Some(index) = params.iter().position(|param| param == token) {
                 if let Some(arg) = args.get(index) {
                     output.push_str(arg);
+                    // Legacy string parameters also occur without colons, e.g. P1.S.
+                    if line[end..].starts_with(".S") && line[end + 2..].chars().next()
+                        .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '.') {
+                        while chars.peek().is_some_and(|(position, _)| *position < end + 2) {
+                            chars.next();
+                        }
+                    }
                     continue;
                 }
             }
@@ -571,6 +579,66 @@ mod loop_expression_tests {
         let legacy = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../BACKUP/XCODE101L/PAL.OBJ")).unwrap();
         let text_start = u32::from_le_bytes(legacy[40..44].try_into().unwrap()) as usize;
         assert_eq!(u16::from_le_bytes(legacy[text_start+36..text_start+38].try_into().unwrap()),0x0d3f);
+    }
+
+    #[test]
+    fn byte_moves_match_execution_table_and_reject_invalid_forms() {
+        // 34010tbl.hxx: MOVB register/indirect/displacement dispatch families.
+        for (source, words) in [
+            ("movb a2,*a3", vec![0x8c43u16]), ("movb *b2,b3", vec![0x8e53]),
+            ("movb *a2,*a3", vec![0x9c43]), ("movb b2,*b3(16)", vec![0xac53,16]),
+            ("movb *a2(-16),a3", vec![0xae43,0xfff0]),
+            ("movb *b2(16),*b3(32)", vec![0xbc53,16,32]),
+            ("movb sp,*b3", vec![0x8df3]), ("movb *a2,sp", vec![0x8e4f]),
+        ] {
+            let mut assembler = Assembler::new();
+            let ast = assembler.pass_one(&[source]).unwrap();
+            assert!(omitted_instructions(&ast).is_empty(), "{source}");
+            let expected = words.into_iter().flat_map(u16::to_le_bytes).collect::<Vec<_>>();
+            assert_eq!(assembler.pass_two(&ast).unwrap(), expected, "{source}");
+        }
+        for source in ["movb a2,b3", "movb a2,a3", "movb a2,*b3", "movb *a2(16),*b3(32)",
+                       "movb *a2+,a3", "movb a2,-*a3"] {
+            let mut assembler = Assembler::new();
+            let ast = assembler.pass_one(&[source]).unwrap();
+            assert!(assembler.pass_two(&ast).is_err(), "{source}");
+        }
+        for source in ["movb a2,*a3 junk", "movb a2,*a3,1", "movb *a2(16),a3+4"] {
+            assert!(parser::parse_movb(source).is_err(), "{source}");
+        }
+        // Independently check real UTIL words at the bit addresses in UTIL.LST.
+        let legacy = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../BACKUP/XCODE101L/UTIL.OBJ")).unwrap();
+        let text_start = u32::from_le_bytes(legacy[40..44].try_into().unwrap()) as usize;
+        for (source, bit_address) in [("movb a9,*a1",0x1ce0), ("movb *a8,a1",0x2300), ("movb *a8,a14",0x2bd0)] {
+            let mut assembler = Assembler::new();
+            let ast = assembler.pass_one(&[source]).unwrap();
+            let offset = text_start + bit_address / 8;
+            assert_eq!(assembler.pass_two(&ast).unwrap(), legacy[offset..offset+2], "{source}");
+        }
+        let mut assembler = Assembler::new();
+        let source = "movb *b2(FIELD+16),*b3(FIELD-16)\nFIELD .equ 32";
+        let ast = assembler.pass_one(&source.lines().collect::<Vec<_>>()).unwrap();
+        let binary = assembler.pass_two(&ast).unwrap();
+        assert_eq!(binary, [0x53,0xbc,48,0,16,0]);
+        let object = ObjectFile::from_assembler(Path::new("test.asm"),&assembler,&ast,&binary);
+        assert_eq!(object.fixups.iter().map(|f| (f.kind.as_str(), f.offset, f.symbol.as_str())).collect::<Vec<_>>(),
+                   [("absolute16",2,"FIELD+16"),("absolute16",4,"FIELD-16")]);
+    }
+
+    #[test]
+    fn production_test_and_swap_macros_consume_string_parameter_suffixes() {
+        let params = vec!["R1".into()];
+        let args = vec!["a2".into()];
+        assert_eq!(substitute_macro_parameters(":R1.S: R1.S R1_SAVE :OTHER.S:", &params, &args),
+                   "a2 a2 R1_SAVE :OTHER.S:");
+        assert_eq!(substitute_macro_parameters("R1.SAVED", &params, &args), "a2.SAVED");
+        let header = load_source_file(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../SRC/MACROS.HDR")).unwrap().join("\n");
+        let source = format!("{header}\nTEST a2\nSWAP b2,b3");
+        let mut assembler = Assembler::new();
+        let ast = assembler.pass_one(&source.lines().collect::<Vec<_>>()).unwrap();
+        assert!(omitted_instructions(&ast).is_empty());
+        assert_eq!(assembler.pass_two(&ast).unwrap(),
+                   [0x4c42u16,0x5653,0x5672,0x5653].into_iter().flat_map(u16::to_le_bytes).collect::<Vec<_>>());
     }
 
     #[test]

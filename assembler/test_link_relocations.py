@@ -34,6 +34,23 @@ class RelativeRelocations(unittest.TestCase):
             expected = struct.pack('<HIHIHIIHH',0x07a0,source+16,0x0780,source+16,0x07c0,source,source+16,0xb622,48)
             self.assertEqual((root/'ROM.bin').read_bytes()[:len(code)],expected)
 
+    def test_movb_two_displacements_relocate_in_source_destination_order(self):
+        code = struct.pack('<HHH', 0xbc53, 0, 0)
+        obj = dict(format='tms34010-object', sections=[
+            dict(name='.text',data=base64.b64encode(code).decode())],
+            symbols=[dict(name='FIELD',section='',address=32,kind='symbol')],
+            fixups=[dict(section='.text',offset=offset,symbol=expression,kind='absolute16')
+                    for offset,expression in [(2,'FIELD+16'),(4,'FIELD-16')]])
+        build = Path(__file__).resolve().parent / 'build'
+        build.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=build) as temporary:
+            root = Path(temporary)
+            self.assertTrue(root.resolve().is_relative_to(build.resolve()))
+            (root/'test.OBJ').write_text(json.dumps(obj))
+            subprocess.run([sys.executable,str(Path(__file__).with_name('link.py')),str(root/'test.OBJ'),
+                            '--output',str(root/'ROM.bin')],check=True,capture_output=True)
+            self.assertEqual((root/'ROM.bin').read_bytes()[:len(code)],struct.pack('<HHH',0xbc53,48,16))
+
     def test_short_branches_patch_low_byte_and_preserve_condition(self):
         for displacement in (-127, -1, 1, 127):
             self.assertEqual(relative_fixup_bytes('tms34010-relative', 0x1000,

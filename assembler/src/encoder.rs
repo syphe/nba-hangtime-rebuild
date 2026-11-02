@@ -366,69 +366,26 @@ pub fn encode_instruction(
                 return Ok(bytes);
             }
 
-            match (src, dst) {
-                (Operand::Indirect(s_reg), Operand::Indirect(d_reg)) => {
-                    let mut opcode: u16 = 0x2700;
-                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
-                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                }
-                (
-                    Operand::IndirectOffset(s_reg, s_offset),
-                    Operand::IndirectOffset(d_reg, d_offset),
-                ) => {
-                    let mut opcode: u16 = 0x2800;
-                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
-                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                    bytes.extend_from_slice(&(crate::parser::evaluate_arithmetic(s_offset, |name| symbols.get(name).or_else(|| symbols.get_ignore_case(name)).copied().unwrap_or(0) as i32) as u16).to_le_bytes());
-                    bytes.extend_from_slice(&(crate::parser::evaluate_arithmetic(d_offset, |name| symbols.get(name).or_else(|| symbols.get_ignore_case(name)).copied().unwrap_or(0) as i32) as u16).to_le_bytes());
-                }
-                (Operand::Reg(s_reg), Operand::DirectMemory(label)) => {
-                    let addr = symbols
-                        .get(label)
-                        .or_else(|| symbols.get_ignore_case(label))
-                        .copied()
-                        .unwrap_or(0);
-                    let mut opcode: u16 = 0x2900;
-                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                    bytes.extend_from_slice(&(addr as u16).to_le_bytes());
-                }
-                (Operand::Indirect(s_reg), Operand::Reg(d_reg)) => {
-                    // TMS34010 MOVB indirect load base opcode (adjust if your ISA table differs)
-                    let mut opcode: u16 = 0x2500;
-                    let s_val = encode_register(s_reg) as u16;
-                    let d_val = encode_register(d_reg) as u16;
-                    opcode |= (s_val & 0x0F) << 4;
-                    opcode |= d_val & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                }
-                (Operand::IndirectOffset(s_reg, offset), Operand::Reg(d_reg)) => {
-                    bytes.extend_from_slice(&0x2500u16.to_le_bytes());
-                    bytes.extend_from_slice(&(crate::parser::evaluate_arithmetic(offset, |name| symbols.get(name).or_else(|| symbols.get_ignore_case(name)).copied().unwrap_or(0) as i32) as u16).to_le_bytes());
-                }
-                (Operand::Reg(s_reg), Operand::Indirect(d_reg)) => {
-                    let mut opcode: u16 = 0x2600;
-                    opcode |= (encode_register(s_reg) as u16 & 0x0F) << 4;
-                    opcode |= encode_register(d_reg) as u16 & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                }
-                (Operand::Reg(s_reg), Operand::IndirectOffset(d_reg, offset)) => {
-                    bytes.extend_from_slice(&0x2600u16.to_le_bytes());
-                    bytes.extend_from_slice(&(crate::parser::evaluate_arithmetic(offset, |name| symbols.get(name).or_else(|| symbols.get_ignore_case(name)).copied().unwrap_or(0) as i32) as u16).to_le_bytes());
-                }
-                (Operand::Reg(s_reg), Operand::Reg(d_reg)) => {
-                    let mut opcode: u16 = 0x2400; // Reg-to-reg byte move
-                    let s_val = encode_register(s_reg) as u16;
-                    let d_val = encode_register(d_reg) as u16;
-                    opcode |= (s_val & 0x0F) << 4;
-                    opcode |= d_val & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                }
+            let (base, source, destination) = match (src, dst) {
+                (Operand::Reg(s), Operand::Indirect(d)) => (0x8C00, s, d),
+                (Operand::Indirect(s), Operand::Reg(d)) => (0x8E00, s, d),
+                (Operand::Indirect(s), Operand::Indirect(d)) => (0x9C00, s, d),
+                (Operand::Reg(s), Operand::IndirectOffset(d, _)) => (0xAC00, s, d),
+                (Operand::IndirectOffset(s, _), Operand::Reg(d)) => (0xAE00, s, d),
+                (Operand::IndirectOffset(s, _), Operand::IndirectOffset(d, _)) => (0xBC00, s, d),
                 _ => return Err(EncodeError::UnsupportedInstruction),
+            };
+            bytes.extend_from_slice(&(base | same_file_registers(source, destination)?).to_le_bytes());
+            for operand in [src, dst] {
+                if let Operand::IndirectOffset(_, expression) = operand {
+                    let value = crate::parser::evaluate_arithmetic(expression, |name| {
+                        symbols.get(name).or_else(|| symbols.get_ignore_case(name)).copied().unwrap_or(0) as i32
+                    });
+                    bytes.extend_from_slice(&(value as u16).to_le_bytes());
+                }
             }
         }
+
         ParsedInstruction::Add { src, dst }
         | ParsedInstruction::Sub { src, dst }
         | ParsedInstruction::And { src, dst }

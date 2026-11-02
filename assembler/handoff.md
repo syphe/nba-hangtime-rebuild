@@ -8,10 +8,10 @@ The native build/link/output pipeline works, but machine-code correctness is sti
 | --- | --- |
 | Build/link | 51 modules, strict link with zero unresolved/out-of-range relocations |
 | Outputs | 14-section COFF, two 512 KiB ROM halves, combined 1 MiB ROM |
-| Regression checks | Twelve Rust tests pass; seven Python tests and report JavaScript checks also pass |
-| Instruction coverage | 1,581 zero-emission occurrences across 37 modules (413 fewer this step) |
-| ROM comparison | 916,392 differing bytes; first difference at byte 0x10 |
-| Section extents | `.text` short by 1,474 bytes; `.data` short by 13,606 bytes; BSS 64 bytes over |
+| Regression checks | Fourteen Rust tests pass; eight Python tests and report JavaScript checks also pass |
+| Instruction coverage | 1,520 zero-emission occurrences across 37 modules (61 fewer this step) |
+| ROM comparison | 909,786 differing bytes; first difference at byte 0x10 |
+| Section extents | `.text` short by 1,358 bytes; `.data` short by 13,606 bytes; BSS 64 bytes over |
 | Proven data matches | TEXT both sections; PAL data with matching preserved inputs (non-relocation bytes and relocation sites) |
 | Baseline limitations | PAL/ATTRACT input differences; PLYRSEQ2 and BB3 preserved source do not fully reproduce their preserved objects |
 
@@ -166,13 +166,16 @@ A modern, native Rust assembler designed for the TMS34010 arcade graphics proces
 - Remaining MOVE examples are now visible in the report: shifted immediate expressions (e.g. `#(BUT2_M|BUT3_M)<<8|BUT2_M|BUT3_M`), packed-coordinate arithmetic, quoted character constants (`#', '`), macro register modifiers (`:a0.S:`), and two source lines with trailing quoted annotations. These include newly diagnosed partial parses, so the candidate count is not a precise measure of distinct missing ISA instructions.
 
 
+- Replaced the remaining MOVB indirect/displacement paths with the six execution-table opcodes (0x8C00, 0x8E00, 0x9C00, 0xAC00, 0xAE00, 0xBC00), including source register bits, file selection, and ordered 16-bit extensions. Unsupported register-to-register and auto-update MOVB modes now fail instead of emitting fabricated opcodes. MOVB parsing requires complete operands. Macro parameter substitution consumes the legacy `.S` string suffix on known parameters; the two trailing STRING annotations now have explicit semicolon comment markers. Fourteen Rust tests and eight Python tests now pass, including preserved UTIL object words at bit addresses 0x1CE0/0x2300/0x2BD0 and a linked two-displacement MOVB fixup. The consistent 51-module rebuild completes with a strict zero-unresolved/out-of-range link, COFF/ROM output, and refreshed HTML/JSON comparison. Zero-emission candidates fell from 1,581 to 1,520; MOVE fell from 24 to 11 and all 48 omitted XOR instances now emit after macro substitution. Text is 0x3B0F50 bits versus 0x3B39C0 (1,358 bytes short); data remains 13,606 bytes short and BSS 64 bytes over. ROM differences fell to 909,786 bytes, first at 0x10. Report JavaScript checks and `git diff --check` pass. No graphics inputs were changed.
+
 ## 6. Next Steps
 
 The next implementation steps are:
 
-1. Use the coverage panel and its operand examples to address the remaining 1,581 zero-emission candidates. Finish the 24 MOVE forms (shift/coordinate expressions, character constants, macro modifiers, and trailing annotations), and audit the older non-absolute MOVB encodings. Then implement GETPC (276), SUBI (220), ABS (118), NEG (104), and other high-count handlers. Preserve per-use values of mutable `.asg`/`.eval` aliases when evaluating deferred expressions. Continue testing memory/address fixups in bit units and opcode reserved bits against execution tables plus preserved words. Repeated bare-local scope and other operand variants remain to audit.
-2. Establish source baselines that actually match the preserved objects before interpreting section deficits as encoder bugs. PAL data is proven correct with preserved inputs; PLYRSEQ2/BB3 have confirmed baseline discrepancies. Classify PLYRAT3's data difference next when returning to this work. Keep using `compare_object.py`, including its explicit limitation for unsupported relocation kinds.
-3. After the code audit and source reconciliation, resolve the 64-byte BSS excess and compare vector/section ranges, then perform final byte and runtime validation. Latest ROM comparison: 916,392 differing bytes, first at 0x10.
-4. Keep graphics replacement and GSP changes separate until the program-ROM linker passes byte comparison.
+1. Expression evidence for the next batch: preserved AUDIT.LST line 1040 emits `4<<10+4<<5+7` as 0x1087, so shift binds more tightly than addition here. MENU.LST line 3000 emits `[0F2H,166H]-[41H,29H]` as 0x00B1013D: **the first coordinate is the high word**, contrary to the current linker coordinate rewrite and the earlier history entry. Correct both evaluators against these goldens before accepting remaining MOVE syntax. The reported `#', ', a2` example is a diagnostic comma-splitting artifact: UTIL source/listing actually uses the single comma character `','` (0x2C). Preserve per-use mutable aliases rather than looking up their final values.
+2. Use the coverage panel and its operand examples to address the remaining 1,520 zero-emission candidates. Finish the 11 MOVE forms (shift/coordinate expressions and character constants). The MOVB opcode audit and macro/trailing-annotation fixes are complete for the supported modes. Then implement GETPC (276), SUBI (220), ABS (118), NEG (104), and other high-count handlers. Preserve per-use values of mutable `.asg`/`.eval` aliases when evaluating deferred expressions. Continue testing memory/address fixups in bit units and opcode reserved bits against execution tables plus preserved words. Repeated bare-local scope and other operand variants remain to audit.
+3. Establish source baselines that actually match the preserved objects before interpreting section deficits as encoder bugs. PAL data is proven correct with preserved inputs; PLYRSEQ2/BB3 have confirmed baseline discrepancies. Classify PLYRAT3's data difference next when returning to this work. Keep using `compare_object.py`, including its explicit limitation for unsupported relocation kinds.
+4. After the code audit and source reconciliation, resolve the 64-byte BSS excess and compare vector/section ranges, then perform final byte and runtime validation. Latest ROM comparison: 909,786 differing bytes, first at 0x10.
+5. Keep graphics replacement and GSP changes separate until the program-ROM linker passes byte comparison.
 
 Graphics replacement remains separate and must not be included in the linker implementation commit.

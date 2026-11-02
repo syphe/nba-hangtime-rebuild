@@ -1351,10 +1351,14 @@ pub fn parse_pixt(input: &str) -> IResult<&str, ParsedInstruction> {
 pub fn parse_movb(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = tag_no_case("MOVB")(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, src) = parse_operand(input)?;
-    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
-    let (input, dst) = parse_operand(input)?;
-    Ok((input, ParsedInstruction::Movb { src, dst }))
+    let args = split_asm_operands(input);
+    let invalid = || nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag));
+    if args.len() != 2 { return Err(invalid()); }
+    let (rest, src) = parse_operand(&args[0]).map_err(|_| invalid())?;
+    if !rest.trim().is_empty() { return Err(invalid()); }
+    let (rest, dst) = parse_operand(&args[1]).map_err(|_| invalid())?;
+    if !rest.trim().is_empty() { return Err(invalid()); }
+    Ok(("", ParsedInstruction::Movb { src, dst }))
 }
 
 pub fn parse_legacy_immediate(input: &str) -> IResult<&str, Operand> {

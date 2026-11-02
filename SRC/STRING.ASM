@@ -790,7 +790,7 @@ clear_buffer2
 	movi	BAST_Y_P,a1		;highlight cycle colour
 	move	a1,@message_palette,L
 
-	movi	str_line11,a4		"DEFEATED NN"
+	movi	str_line11,a4		;"DEFEATED NN"
 	callr	copy_rom_string
 
 	move	*a13(PC_DATADDR),a0,L	;start of player data
@@ -798,7 +798,7 @@ clear_buffer2
 	cmpi	NUM_TEAMS,a0
 	jrlo	#not_all
 
-	movi	str_all,a4		" ALL"
+	movi	str_all,a4		;" ALL"
 	callr	concat_rom_string
 	jruc	skipit
 #not_all
