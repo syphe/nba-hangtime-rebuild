@@ -78,14 +78,17 @@ A modern, native Rust assembler designed for the TMS34010 arcade graphics proces
 - The provisional layout report shows object `.text` totals are 0x1819D0 bits versus 0x3B39C0 in the legacy map (short by 0x231FF0 bits / 287,742 bytes). `.data` totals are 0x80670 bits versus 0x3C50E0 (short by 0x344A70 bits / 428,366 bytes). All 45 mapped `.text` object contributions and all 31 `.data` contributions differ; `IMGTBL.OBJ` has no `.data` payload in the current object set. Object files still provide no BSS allocation sizes; legacy `.bss` is 0x13E1F0 bits.
 - Provisional `BB.OUT` has all 14 expected COFF sections, with 12 section names/addresses/sizes matching legacy `BB.OUT`. `.text` and `.data` header addresses match, but their sizes are smaller by the same payload deficits above. The provisional combined ROM is 1,048,576 bytes and differs from the reference at 923,301 bytes (first difference at byte 0); this comparison is diagnostic only because the provisional image has 17,492 unresolved/out-of-range relocation sites left unchanged.
 - Diagnostics for handoff steps 2 and 3 are complete: they quantify the section payload mismatch and show that the COFF container layout is mostly correct while its program sections are incomplete. Final section/BSS/vector validation and final COFF/ROM validation remain blocked on correct assembly payloads and a fully resolved link.
+- `.WORD` handling now splits top-level comma-separated operands while respecting nested parentheses/brackets and quoted text. The main assembly path uses the split list for pass-one sizing, encoder output, object section lengths, and per-element `absolute16` fixups. Numeric TI `b` suffixes and `#`-prefixed `.WORD` expressions are supported; the linker expression evaluator also handles XOR (`^`).
+- After rebuilding the 51-object set, `.text` grew by 0x49230 bits (37,446 bytes) and `.data` grew by 0x23AA20 bits (299,568 bytes) compared with the prior object set. Current payload totals are `.text` 0x1CAC00 versus legacy 0x3B39C0 bits (short by 250,296 bytes) and `.data` 0x2BB090 versus legacy 0x3C50E0 (short by 136,202 bytes). `IMGTBL.OBJ` still emits empty sections despite a legacy `.data` allocation of 0x2E100 bits.
+- A provisional link now reports 207 distinct unresolved/out-of-range object-expression pairs rather than the earlier 17,492, confirming that most comma-packed numeric `.WORD` tables are now encoded as data instead of false relocations. The provisional split ROM still differs from the reference at 938,779 bytes (first difference at byte 0); it is not a valid ROM while relocations and payload sizes remain incomplete.
 
 ## 6. Next Steps
 
 The next implementation steps are:
 
-1. Correct `.WORD` fixup generation and data parsing so numeric comma-separated tables are emitted with their full payload sizes; then resolve genuine external references and rerun the linker.
+1. Investigate the remaining `.text`/`.data` payload deficits, especially `IMGTBL.OBJ`'s empty output versus the legacy `.data` map entry, and resolve the remaining 207 object-expression pairs.
 2. Add BSS/vector allocation metadata to objects and compare all initialized and uninitialized section ranges with `BB.CMD` and `BB.MAP`.
-3. After a clean link, validate final `BB.OUT` with the legacy ROM conversion tools and compare the native combined ROM byte-for-byte. Provisional comparison currently shows a 923,301-byte mismatch and must not be treated as final validation.
+3. After a clean link, validate final `BB.OUT` with the legacy ROM conversion tools and compare the native combined ROM byte-for-byte. The latest provisional comparison differs in 938,779 bytes and is not final validation.
 4. Keep graphics replacement and GSP changes separate until the program-ROM linker passes byte comparison.
 
 Graphics replacement remains separate and must not be included in the linker implementation commit.

@@ -203,6 +203,7 @@ def resolve_expression(expression: str, symbols: dict[str, int], signed_constant
             if isinstance(node.op, ast.FloorDiv): return left // right
             if isinstance(node.op, ast.BitOr): return left | right
             if isinstance(node.op, ast.BitAnd): return left & right
+            if isinstance(node.op, ast.BitXor): return left ^ right
             if isinstance(node.op, ast.LShift): return left << right
             if isinstance(node.op, ast.RShift): return left >> right
         raise ValueError(f"unsupported relocation expression {expression!r}")

@@ -944,6 +944,7 @@ pub fn resolve_immediate(op: &Operand, symbols: &SymbolTable) -> Result<i32, Enc
 fn resolve_immed_expr_part(part: &str, symbols: &SymbolTable) -> Result<i32, EncodeError> {
     let part = part
         .trim()
+        .trim_start_matches('#')
         .trim_start_matches('(')
         .trim_end_matches(')')
         .trim();
@@ -958,6 +959,11 @@ fn resolve_immed_expr_part(part: &str, symbols: &SymbolTable) -> Result<i32, Enc
     } else if part.len() > 1 && (part.ends_with('H') || part.ends_with('h')) {
         let hex = &part[..part.len() - 1];
         i32::from_str_radix(hex, 16).map_err(|_| EncodeError::UndefinedSymbol(part.to_string()))
+    } else if part.len() > 1 && (part.ends_with('B') || part.ends_with('b'))
+        && part[..part.len() - 1].chars().all(|ch| matches!(ch, '0' | '1'))
+    {
+        i32::from_str_radix(&part[..part.len() - 1], 2)
+            .map_err(|_| EncodeError::UndefinedSymbol(part.to_string()))
     } else if part.contains('*') {
         let pieces: Vec<&str> = part.splitn(2, '*').collect();
         if pieces.len() == 2 {

@@ -5,7 +5,6 @@ use nom::{
         alphanumeric1, char, multispace0, multispace1, satisfy, space0, space1, u32 as parse_u32,
     },
     combinator::{map, opt},
-    multi::separated_list1,
     sequence::{delimited, preceded, separated_pair},
     IResult,
 };
@@ -669,20 +668,47 @@ pub fn parse_label(input: &str) -> IResult<&str, ParsedInstruction> {
 pub fn parse_directive(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, name) = alt((tag_no_case(".WORD"), tag_no_case(".BYTE")))(input)?;
     let (input, _) = multispace1(input)?;
-
-    // Parse comma-separated arguments following the directive
-    let (input, args) = separated_list1(
-        delimited(multispace0, char(','), multispace0),
-        take_while1(|c: char| !c.is_whitespace() && c != ';'),
-    )(input)?;
+    let (input, args_text) = take_while1(|c: char| c != '\r' && c != '\n' && c != ';')(input)?;
 
     Ok((
         input,
         ParsedInstruction::Directive {
             name: name.to_string(),
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: split_asm_operands(args_text),
         },
     ))
+}
+
+/// Split an assembler operand list on top-level commas, preserving commas inside
+/// parentheses, brackets, and quoted strings.
+pub fn split_asm_operands(input: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut start = 0;
+    let mut parens = 0usize;
+    let mut brackets = 0usize;
+    let mut quote = None;
+    for (index, ch) in input.char_indices() {
+        if let Some(active_quote) = quote {
+            if ch == active_quote { quote = None; }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => parens += 1,
+            ')' => parens = parens.saturating_sub(1),
+            '[' => brackets += 1,
+            ']' => brackets = brackets.saturating_sub(1),
+            ',' if parens == 0 && brackets == 0 => {
+                let operand = input[start..index].trim();
+                if !operand.is_empty() { result.push(operand.to_string()); }
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let operand = input[start..].trim();
+    if !operand.is_empty() { result.push(operand.to_string()); }
+    result
 }
 
 /// Parse shift instructions (e.g., "SLL 5, A0" or "SLL #5, A0")

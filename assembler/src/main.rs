@@ -97,6 +97,11 @@ fn is_symbolic_expression(value: &str) -> bool {
             return false;
         }
     }
+    if let Some(binary) = value.strip_suffix('b').or_else(|| value.strip_suffix('B')) {
+        if !binary.is_empty() && binary.chars().all(|ch| matches!(ch, '0' | '1')) {
+            return false;
+        }
+    }
     value.chars().any(|ch| ch.is_ascii_alphabetic() || ch == '_' || ch == '#')
 }
 
@@ -913,7 +918,13 @@ impl Assembler {
             if trimmed.starts_with('.') {
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
                 let name = parts[0].to_string();
-                let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+                let args_text = trimmed[name.len()..].trim();
+                let mut args = parser::split_asm_operands(args_text);
+                if name.eq_ignore_ascii_case(".WORD") {
+                    for arg in &mut args {
+                        *arg = arg.trim_start_matches('#').trim().to_string();
+                    }
+                }
 
                 if name.eq_ignore_ascii_case(".WORD") {
                     self.current_address += (args.len() * 2) as u32;
