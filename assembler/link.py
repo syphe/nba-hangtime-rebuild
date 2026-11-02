@@ -159,7 +159,15 @@ def compare_coff(path: Path, legacy_path: Path):
 
 
 def resolve_expression(expression: str, symbols: dict[str, int], signed_constants: set[str] | None = None):
-    text = expression.strip().replace("$", "0x")
+    text = expression.strip()
+    # Legacy coordinate pairs use [x,y] as a packed 32-bit value with y in
+    # the high word and x in the low word (equivalent to y*10000h+x).
+    text = re.sub(
+        r"\[\s*([^\[\],]+)\s*,\s*([^\[\]]+)\s*\]",
+        lambda match: f"(({match.group(2).strip()})*0x10000+({match.group(1).strip()}))",
+        text,
+    )
+    text = text.replace("$", "0x")
     exact_symbol = symbols.get(text.lower())
     if exact_symbol is not None:
         return exact_symbol
@@ -195,6 +203,8 @@ def resolve_expression(expression: str, symbols: dict[str, int], signed_constant
             return evaluate(node.body)
         if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
             return int(node.value)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and len(node.value) == 1:
+            return ord(node.value)
         if isinstance(node, ast.UnaryOp):
             value = evaluate(node.operand)
             if isinstance(node.op, ast.UAdd): return value

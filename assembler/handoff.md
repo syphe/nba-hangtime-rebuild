@@ -84,12 +84,13 @@ A modern, native Rust assembler designed for the TMS34010 arcade graphics proces
 - `IMGTBL.ASM` was restored from the preserved legacy source instead of leaving the empty stub. `.LONG` directives are now parsed, sized in both layout passes, encoded as 32-bit little-endian values, and represented by `absolute32` object fixups. The IMGTBL dependency list now includes its four table include files. IMGTBL emits 23,246 bytes of `.data`; the legacy map reserves 23,584 bytes, leaving a 338-byte extent difference to investigate.
 - Macro argument expansion now substitutes explicitly delimited parameters such as `:X:` and bare whole-identifier parameters without rewriting substrings inside unrelated names. This prevents `MESS_MAC`'s `X` argument from changing `AM_HX` to `AM_HAM_HX`. A scanner off-by-one found during the first object sweep was corrected; an isolated ADJUST assembly then succeeded.
 - The latest full 51-module object sweep succeeds, and the provisional link completes. It reports 1,364 short-relative relocations and 301 distinct unresolved/out-of-range relocation expressions. Current mapped payload totals are `.text` 0x2C63C0 bits versus 0x3B39C0 (short by 121,536 bytes) and `.data` 0x34F3A0 versus 0x3C50E0 (short by 60,328 bytes). These figures supersede the earlier payload measurements; 41/45 mapped text contributions and 16/31 mapped data contributions still differ. The generated COFF still has 14 sections, with only `.text`/`.data` size and address mismatches against the legacy headers. The provisional binary is 1,043,936 bytes and remains unsuitable as a final ROM because unresolved relocations remain.
+- The linker now evaluates legacy packed coordinate expressions `[x,y]` as `y*0x10000+x`, consistent with `MESS_MAC`, and resolves one-character quoted literals to their character codes. This reduced the distinct unresolved/out-of-range set from 301 to 167 (the coordinate support removed 99; character literals removed a further 35). Python syntax checks and direct expression checks returned the expected coordinate values and ASCII `A`/`Z` codes.
 
 ## 6. Next Steps
 
 The next implementation steps are:
 
-1. Resolve the remaining 301 relocation expressions and investigate the `.text`/`.data` contribution deficits, including the 338-byte IMGTBL extent mismatch.
+1. Resolve the remaining 167 relocation expressions and investigate the `.text`/`.data` contribution deficits, including the 338-byte IMGTBL extent mismatch.
 2. Add BSS/vector allocation metadata to objects and compare all initialized and uninitialized section ranges with `BB.CMD` and `BB.MAP`.
 3. After a clean link, validate final `BB.OUT` with the legacy ROM conversion tools and compare the native combined ROM byte-for-byte. The latest provisional comparison differs in 938,779 bytes and is not final validation.
 4. Keep graphics replacement and GSP changes separate until the program-ROM linker passes byte comparison.
