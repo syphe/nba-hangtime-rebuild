@@ -62,7 +62,7 @@ A modern, native Rust assembler designed for the TMS34010 arcade graphics proces
 - The Python linker now recognizes compound relocation expressions and preserves absolute constants separately from section symbols. Remaining expression work is to resolve symbolic `.equ` chains (for example `TM_X+189` and `ADJ_ULY-20`) rather than recording them as zero.
 - Recent full-object validation reached linker expression diagnosis successfully; final clean rebuild/link validation remains in progress after expression-symbol fixes.
 - Rust pass one now retains `.equ`/`.set` source expressions and reevaluates them after labels are collected, allowing forward symbol references and equate chains to be represented in the symbol table.
-- The encoder now errors on known 8-bit relative branch offsets outside -128..127 instead of clamping them. The Python linker likewise rejects out-of-range relative relocations. Long-branch expansion is still outstanding; the legacy map is not yet used to define a safe expansion sequence.
+- The encoder now promotes supported unconditional, equal/not-equal, less-than, and greater-than relative branches to the TMS34010 two-word, signed 16-bit `JRcc` form when the short displacement is out of range. Pass one repeats label/equate layout until branch-size changes settle. Object files mark expanded branch operands as `tms34010-relative16`, and `link.py` resolves and range-checks those fixups. Relative calls still reject short-range overflow; remaining conditional mnemonics need condition-code preservation in the parser, and targets beyond the long relative range need `JAcc` support.
 - Object generation emits `absolute16` fixups for `.WORD` expressions containing symbols; symbolic `MOVI` operands use the existing `absolute32` fixup path. The linker applies both widths.
 - The experimental linker can now take `--cmd-file SRC/BB.CMD`; `build.ps1 -ObjectFormat` passes that file so legacy-listed modules are placed in command-file order, with additional modules appended afterward. It also rejects text/data payloads larger than the ROM region defined by `BB.CMD` (origin `0xFF800000`, length `0x7F6F00`). The legacy map confirms separate packed `.text` then `.data` ranges; byte-for-byte layout reconciliation has not yet been completed.
 
@@ -70,7 +70,7 @@ A modern, native Rust assembler designed for the TMS34010 arcade graphics proces
 
 The next implementation steps are:
 
-1. Define and implement a correct long-branch expansion for out-of-range branches, including equivalent linker fixups for expanded sequences.
+1. Complete long-range control-flow relocation coverage for relative calls, all parsed conditional mnemonics, and targets requiring `JAcc`.
 2. Validate linker section addresses and sizes against all entries in `SRC/BB.CMD` and `BACKUP/XCODE101L/BB.MAP`, including initialized vectors and uninitialized memory sections.
 3. Generate `BB.OUT` in a format compatible with the legacy ROM conversion tools.
 4. Add native ROM conversion/splitting to `assembler/build.ps1` and compare output with the DOSBox reference artifacts byte-for-byte.

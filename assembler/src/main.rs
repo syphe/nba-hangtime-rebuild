@@ -155,7 +155,8 @@ impl ObjectFile {
                 let directive = name.trim_start_matches('.').to_ascii_lowercase();
                 directive == "sect" || matches!(directive.as_str(), "text" | "data" | "bss")
             }) {
-                let len = encoder::encode_instruction(instruction, 0, &assembler.symbol_table)
+                let section_pc = section_offsets.get(&label_section).copied().unwrap_or(0);
+                let len = encoder::encode_instruction(instruction, section_pc, &assembler.symbol_table)
                     .map(|bytes| bytes.len() as u32)
                     .unwrap_or(2);
                 *section_offsets.entry(label_section.clone()).or_default() += len;
@@ -197,6 +198,10 @@ impl ObjectFile {
                 }
             }
 
+            let section_pc = section_offsets.get(&current_section).copied().unwrap_or(0);
+            let encoded = encoder::encode_instruction(instruction, section_pc, &assembler.symbol_table)
+                .unwrap_or_default();
+
             let symbol = match instruction {
                 Instruction::Jr { label }
                 | Instruction::Call { label }
@@ -222,14 +227,24 @@ impl ObjectFile {
                     || upper == "SP"
                     || upper == "FP";
                 if !is_register {
+                    let is_rel_branch = matches!(
+                        instruction,
+                        Instruction::Jr { .. }
+                            | Instruction::Jeq { .. }
+                            | Instruction::Jne { .. }
+                            | Instruction::Jlt { .. }
+                            | Instruction::Jgt { .. }
+                    );
                     let kind = match &instruction {
                         Instruction::Calla { .. } | Instruction::Move { .. } => "absolute32",
+                        _ if is_rel_branch && encoded.len() == 4 => "tms34010-relative16",
                         _ => "tms34010-relative",
                     };
+                    let field_offset = if kind == "absolute32" || kind == "tms34010-relative16" { 2 } else { 0 };
                     fixups.push(ObjectFixup {
                         offset: section_offsets.get(&current_section).copied().unwrap_or(0)
-                            + if kind == "absolute32" { 2 } else { 0 },
-                        object_offset: offset + if kind == "absolute32" { 2 } else { 0 },
+                            + field_offset,
+                        object_offset: offset + field_offset,
                         section: current_section.clone(),
                         symbol: symbol.to_string(),
                         kind: kind.to_string(),
@@ -252,8 +267,6 @@ impl ObjectFile {
                     }
                 }
             }
-            let encoded = encoder::encode_instruction(instruction, offset, &assembler.symbol_table)
-                .unwrap_or_default();
             let encoded_len = encoded.len() as u32;
             if !encoded.is_empty() {
                 let section = section_data
@@ -1033,15 +1046,42 @@ impl Assembler {
             }
         }
 
-        // Re-evaluate after labels have been assigned. A few rounds allow chains
-        // such as A EQU B+1 / B EQU TARGET to settle when declarations are forward.
-        for _ in 0..=pending_equates.len() {
+        // Re-layout after labels and equates are known. Branches that promote to
+        // the two-word form move later labels, so repeat until addresses settle.
+        for _ in 0..=ast.len() {
+            let previous_symbols = self.symbol_table.symbols.clone();
+            let mut address = 0u32;
+            for instruction in &ast {
+                match instruction {
+                    Instruction::Label(name) => {
+                        self.symbol_table.insert(name.clone(), address);
+                    }
+                    Instruction::Equ { .. } => {}
+                    Instruction::Directive { name, args } if name.eq_ignore_ascii_case(".WORD") => {
+                        address += (args.len() * 2) as u32;
+                    }
+                    _ => {
+                        address += encoder::encode_instruction(
+                            instruction,
+                            address,
+                            &self.symbol_table,
+                        )
+                        .map(|bytes| bytes.len() as u32)
+                        .unwrap_or(2);
+                    }
+                }
+            }
+
+            // Resolve forward and chained equates using the latest label layout.
             let values: Vec<(String, u32)> = pending_equates.iter().map(|(name, expr)| {
                 let symbols: HashMap<String, u32> = self.symbol_table.symbols.iter()
                     .map(|(key, value)| (key.to_ascii_uppercase(), *value)).collect();
                 (name.clone(), parser::parse_expression_value(&format!(".equ {} {}", name, expr), &symbols) as u32)
             }).collect();
             for (name, value) in values { self.symbol_table.insert(name, value); }
+            if self.symbol_table.symbols == previous_symbols {
+                break;
+            }
         }
         Ok(ast)
     }

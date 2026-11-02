@@ -14,7 +14,7 @@ pub enum EncodeError {
     UndefinedSymbol(String),
     #[error("Invalid operand for instruction")]
     InvalidOperand,
-    #[error("Branch offset {offset} words out of 8-bit signed range (-128..127) for label '{label}' at {addr:04X}")]
+    #[error("Relative branch displacement {offset} words is out of range for label '{label}' at {addr:04X}")]
     BranchOutOfRange {
         label: String,
         addr: u32,
@@ -27,6 +27,33 @@ pub fn encode_register(reg: &Register) -> u8 {
         Register::A(num) => *num,
         Register::B(num) => 16 + *num,
     }
+}
+
+fn encode_conditional_relative(
+    bytes: &mut Vec<u8>,
+    condition: u16,
+    short_words: i64,
+    target_addr: u32,
+    current_addr: u32,
+    label: &str,
+) -> Result<(), EncodeError> {
+    if short_words == 0 {
+        bytes.extend_from_slice(&0x0000u16.to_le_bytes());
+        return Ok(());
+    }
+    if (-127..=127).contains(&short_words) {
+        bytes.extend_from_slice(&(0x6000 | (condition << 8) | (short_words as u16 & 0xFF)).to_le_bytes());
+        return Ok(());
+    }
+    let long_words = (target_addr as i64 - (current_addr + 4) as i64) / 2;
+    if long_words < i16::MIN as i64 || long_words > i16::MAX as i64 || long_words == 0 {
+        return Err(EncodeError::BranchOutOfRange {
+            label: label.to_string(), addr: current_addr, offset: long_words as i32,
+        });
+    }
+    bytes.extend_from_slice(&(0xC000 | (condition << 8)).to_le_bytes());
+    bytes.extend_from_slice(&(long_words as i16).to_le_bytes());
+    Ok(())
 }
 
 /// Encode a single instruction given its current memory address and the symbol table
@@ -86,28 +113,40 @@ pub fn encode_instruction(
                 .copied()
                 .unwrap_or(current_addr);
 
-            let pc_next = current_addr + 2;
-            let offset_bytes = (target_addr as i32) - (pc_next as i32);
-            let word_offset = (offset_bytes / 2) as i16;
-
-            if !(-128..=127).contains(&word_offset) {
+            let (short_opcode, long_condition): (u16, Option<u16>) = match instr {
+                ParsedInstruction::Jr { .. } => (0x6000, Some(0x0)),
+                ParsedInstruction::Jeq { .. } => (0x6A00, Some(0xA)),
+                ParsedInstruction::Jne { .. } => (0x6B00, Some(0xB)),
+                ParsedInstruction::Call { .. } | ParsedInstruction::Callr { .. } => (0xEF00, None),
+                _ => unreachable!(),
+            };
+            let short_delta = target_addr as i64 - (current_addr + 2) as i64;
+            let short_words = short_delta / 2;
+            if short_delta % 2 != 0 {
                 return Err(EncodeError::BranchOutOfRange {
                     label: label.clone(),
                     addr: current_addr,
-                    offset: word_offset as i32,
+                    offset: short_words as i32,
                 });
             }
-
-            let mut opcode: u16 = match instr {
-                ParsedInstruction::Jr { .. } => 0x6F00,
-                ParsedInstruction::Call { .. } | ParsedInstruction::Callr { .. } => 0xEF00,
-                ParsedInstruction::Jeq { .. } => 0x6700,
-                ParsedInstruction::Jne { .. } => 0x6800,
-                _ => unreachable!(),
-            };
-
-            opcode |= (word_offset as u16) & 0x00FF;
-            bytes.extend_from_slice(&opcode.to_le_bytes());
+            if short_words == 0 && long_condition.is_some() {
+                bytes.extend_from_slice(&0x0000u16.to_le_bytes());
+            } else if (-127..=127).contains(&short_words) {
+                bytes.extend_from_slice(&(short_opcode | (short_words as u16 & 0xFF)).to_le_bytes());
+            } else if let Some(condition) = long_condition {
+                let long_words = (target_addr as i64 - (current_addr + 4) as i64) / 2;
+                if long_words < i16::MIN as i64 || long_words > i16::MAX as i64 || long_words == 0 {
+                    return Err(EncodeError::BranchOutOfRange {
+                        label: label.clone(), addr: current_addr, offset: long_words as i32,
+                    });
+                }
+                bytes.extend_from_slice(&(0xC000 | (condition << 8)).to_le_bytes());
+                bytes.extend_from_slice(&(long_words as i16).to_le_bytes());
+            } else {
+                return Err(EncodeError::BranchOutOfRange {
+                    label: label.clone(), addr: current_addr, offset: short_words as i32,
+                });
+            }
         }
         ParsedInstruction::Move { src, dst, field } => {
             let field_val = if let Some(f) = field {
@@ -552,21 +591,16 @@ pub fn encode_instruction(
                 .copied()
                 .unwrap_or(current_addr);
 
-            let pc_next = current_addr + 2;
-            let offset_bytes = target_addr as i32 - pc_next as i32;
-            let word_offset = (offset_bytes / 2) as i16;
-
-            if !(-128..=127).contains(&word_offset) {
+            let short_delta = target_addr as i64 - (current_addr + 2) as i64;
+            let short_words = short_delta / 2;
+            if short_delta % 2 != 0 {
                 return Err(EncodeError::BranchOutOfRange {
                     label: target.clone(),
                     addr: current_addr,
-                    offset: word_offset as i32,
+                    offset: short_words as i32,
                 });
             }
-
-            let mut opcode: u16 = 0x6100;
-            opcode |= (word_offset as u16) & 0x00FF;
-            bytes.extend_from_slice(&opcode.to_le_bytes());
+            encode_conditional_relative(&mut bytes, 0x4, short_words, target_addr, current_addr, target)?;
         }
         ParsedInstruction::Jgt { target } => {
             let target_addr = symbols
@@ -575,21 +609,16 @@ pub fn encode_instruction(
                 .copied()
                 .unwrap_or(current_addr);
 
-            let pc_next = current_addr + 2;
-            let offset_bytes = target_addr as i32 - pc_next as i32;
-            let word_offset = (offset_bytes / 2) as i16;
-
-            if !(-128..=127).contains(&word_offset) {
+            let short_delta = target_addr as i64 - (current_addr + 2) as i64;
+            let short_words = short_delta / 2;
+            if short_delta % 2 != 0 {
                 return Err(EncodeError::BranchOutOfRange {
                     label: target.clone(),
                     addr: current_addr,
-                    offset: word_offset as i32,
+                    offset: short_words as i32,
                 });
             }
-
-            let mut opcode: u16 = 0x6200;
-            opcode |= (word_offset as u16) & 0x00FF;
-            bytes.extend_from_slice(&opcode.to_le_bytes());
+            encode_conditional_relative(&mut bytes, 0x7, short_words, target_addr, current_addr, target)?;
         }
         ParsedInstruction::Cmp { src, dst } => match (src, dst) {
             (src_op, Operand::Reg(d_reg))

@@ -220,6 +220,18 @@ def main():
                         )
                     rom[start:start + 4] = struct.pack("<I", target)
                 continue
+            if fixup.get("kind") == "tms34010-relative16":
+                relative = (target - (source + 2)) // 2
+                if relative < -32768 or relative > 32767:
+                    raise ValueError(
+                        f"{path}: long relative relocation {fixup['symbol']!r} at 0x{source:X} "
+                        f"is out of range ({relative} words; expected -32768..32767)"
+                    )
+                start = source - ROM_BASE
+                if start < 0 or start + 2 > len(rom):
+                    raise ValueError(f"{path}: long relative fixup is outside the ROM image")
+                rom[start:start + 2] = struct.pack("<h", relative)
+                continue
             relative = (target - (source + 2)) // 2
             if relative < -128 or relative > 127:
                 raise ValueError(
