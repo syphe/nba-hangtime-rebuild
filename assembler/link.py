@@ -51,16 +51,17 @@ def rom_region(cmd_path: Path | None):
     return tuple(int(value, 0) if value.lower().startswith("0x") else int(value, 16) for value in match.groups())
 
 
-def write_tms34010_coff(path: Path, text: bytes, data: bytes, rom_base: int, entry: int):
+def write_tms34010_coff(path: Path, text: bytes, data: bytes, rom_base: int, entry: int, extra_sections=None):
     """Write a linked TMS34010 COFF image for the legacy bigsrec converter."""
+    extra_sections = extra_sections or {}
     section_specs = [
-        ("VECTORS", 0xFFFFFC00, b"", 0x40),
+        ("VECTORS", 0xFFFFFC00, extra_sections.get("VECTORS", b""), 0x40),
         ("IMAGES", 0x02000000, b"", 0x0),
         ("shit", 0xFFFF6F00, b"", 0x0),
         ("SHIT", 0xFFFF6F00, b"", 0x0),
         ("STACK", 0x01000000, b"", 0x40),
-        ("PRCBSS", 0x01002000, b"", 0x40),
-        ("OBJBSS", 0x01002040, b"", 0x40),
+        ("PRCBSS", 0x01002000, extra_sections.get("PRCBSS", b""), 0x40),
+        ("OBJBSS", 0x01002040, extra_sections.get("OBJBSS", b""), 0x40),
         (".BSS", 0x010020A0, b"", 0x0),
         (".bss", 0x010020A0, b"", 0x80),
         (".text", rom_base, text, 0x920),
@@ -74,19 +75,24 @@ def write_tms34010_coff(path: Path, text: bytes, data: bytes, rom_base: int, ent
         "OBJBSS": 0x60, ".bss": 0x13E1F0,
     }
     header_size = 20 + 28 + len(section_specs) * 40
-    text_pointer = header_size
-    data_pointer = text_pointer + len(text)
+    payload_pointers = {}
+    cursor = header_size
+    for name, _, payload, _ in section_specs:
+        if payload:
+            payload_pointers[name] = cursor
+            cursor += len(payload)
     out = bytearray(struct.pack("<HHIIIHH", 0x0090, len(section_specs), 0, 0, 0, 28, 0x011F))
     out.extend(struct.pack("<HHIIIIII", 0x0108, 0x0262, len(text) * 8, len(data) * 8, 0, entry, rom_base, rom_base + len(text) * 8))
     for name, address, payload, flags in section_specs:
-        pointer = text_pointer if name == ".text" and payload else data_pointer if name == ".data" and payload else 0
+        pointer = payload_pointers.get(name, 0)
         out.extend(struct.pack(
             "<8sIIIIIIHHI",
             name.encode("ascii")[:8].ljust(8, b"\0"), address, address,
             section_sizes.get(name, len(payload) * 8), pointer, 0, 0, 0, 0, flags,
         ))
-    out.extend(text)
-    out.extend(data)
+    for name, _, payload, _ in section_specs:
+        if payload:
+            out.extend(payload)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(out)
 
@@ -245,6 +251,12 @@ def main():
     symbols = {}
     symbol_kinds = {}
     placements = []
+    non_rom_origins = {
+        "vectors": 0xFFFFFC00, "stack": 0x01000000,
+        "prcbss": 0x01002000, "objbss": 0x01002040,
+        ".bss": 0x010020A0,
+        "images": 0x02000000, "shit": 0xFFFF6F00, "SHIT": 0xFFFF6F00,
+    }
 
     text_size = sum(
         len(base64.b64decode(section["data"]))
@@ -277,9 +289,7 @@ def main():
                 section_addresses[name] = data_cursor
                 data_cursor += len(data) * 8
             else:
-                if data:
-                    raise ValueError(f"{path}: initialized section {section['name']!r} has no BB.CMD placement")
-                section_addresses[name] = 0
+                section_addresses[name] = non_rom_origins.get(section["name"].lower(), 0)
 
         placements.append((path, obj, section_addresses))
         for symbol in obj.get("symbols", []):
@@ -442,6 +452,14 @@ def main():
     output.write_bytes(rom)
     print(f"Wrote {output} ({len(rom)} bytes)")
     if args.coff_output:
+        coff_extra_sections = {}
+        for section_key in ("vectors", "prcbss", "objbss"):
+            coff_extra_sections[section_key.upper()] = b"".join(
+                base64.b64decode(section["data"])
+                for _, obj in objects
+                for section in obj.get("sections", [])
+                if section_name(section["name"]) == section_key
+            )
         linked_text = b"".join(
             base64.b64decode(section["data"])
             for _, obj in objects
@@ -455,7 +473,8 @@ def main():
             if section_name(section["name"]) == "data"
         )
         write_tms34010_coff(
-            args.coff_output.resolve(), linked_text, linked_data, rom_base, symbols.get("init_prog", 0)
+            args.coff_output.resolve(), linked_text, linked_data, rom_base,
+            symbols.get("init_prog", 0), coff_extra_sections,
         )
         print(f"Wrote linked TMS34010 COFF {args.coff_output.resolve()}")
         if args.legacy_coff:

@@ -666,7 +666,7 @@ pub fn parse_label(input: &str) -> IResult<&str, ParsedInstruction> {
 
 /// Parse a directive like `.WORD 1234` or `.WORD $BEEF`
 pub fn parse_directive(input: &str) -> IResult<&str, ParsedInstruction> {
-    let (input, name) = alt((tag_no_case(".WORD"), tag_no_case(".BYTE")))(input)?;
+    let (input, name) = alt((tag_no_case(".WORD"), tag_no_case(".LONG"), tag_no_case(".BYTE")))(input)?;
     let (input, _) = multispace1(input)?;
     let (input, args_text) = take_while1(|c: char| c != '\r' && c != '\n' && c != ';')(input)?;
 

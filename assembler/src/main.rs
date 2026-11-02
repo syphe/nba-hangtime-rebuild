@@ -13,6 +13,54 @@ mod parser;
 mod verify;
 use parser::{MacroTemplate, Operand, ParsedInstruction};
 
+fn substitute_macro_parameters(
+    line: &str,
+    params: &[String],
+    args: &[String],
+) -> String {
+    let mut output = String::with_capacity(line.len());
+    let mut chars = line.char_indices().peekable();
+    while let Some((start, ch)) = chars.next() {
+        if ch == ':' {
+            if let Some((end, _)) = line[start + 1..].char_indices().find(|(_, c)| *c == ':') {
+                let name_end = start + 1 + end;
+                let name = &line[start + 1..name_end];
+                if let Some(index) = params.iter().position(|param| param == name) {
+                    if let Some(arg) = args.get(index) {
+                        output.push_str(arg);
+                        while chars.peek().is_some_and(|(position, _)| *position <= name_end) {
+                            chars.next();
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            let mut end = start + ch.len_utf8();
+            while let Some((position, next)) = chars.peek().copied() {
+                if next.is_ascii_alphanumeric() || next == '_' {
+                    end = position + next.len_utf8();
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            let token = &line[start..end];
+            if let Some(index) = params.iter().position(|param| param == token) {
+                if let Some(arg) = args.get(index) {
+                    output.push_str(arg);
+                    continue;
+                }
+            }
+            output.push_str(token);
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
 #[derive(Error, Debug)]
 pub enum AsmError {
     #[error("IO error: {0}")]
@@ -277,16 +325,18 @@ impl ObjectFile {
                 }
             }
             if let Instruction::Directive { name, args } = &instruction {
-                if name.eq_ignore_ascii_case(".WORD") {
+                if name.eq_ignore_ascii_case(".WORD") || name.eq_ignore_ascii_case(".LONG") {
+                    let long = name.eq_ignore_ascii_case(".LONG");
+                    let width = if long { 4 } else { 2 };
                     for (index, arg) in args.iter().enumerate() {
                         if is_symbolic_expression(arg) {
                             fixups.push(ObjectFixup {
                                 offset: section_offsets.get(&current_section).copied().unwrap_or(0)
-                                    + index as u32 * 2,
-                                object_offset: offset + index as u32 * 2,
+                                    + index as u32 * width,
+                                object_offset: offset + index as u32 * width,
                                 section: current_section.clone(),
                                 symbol: arg.trim().to_string(),
-                                kind: "absolute16".to_string(),
+                                kind: if long { "absolute32" } else { "absolute16" }.to_string(),
                             });
                         }
                     }
@@ -631,13 +681,11 @@ impl Assembler {
                     let mut expanded_lines = Vec::new();
                     let mut local_labels: HashMap<String, String> = HashMap::new();
                     for body_line in &macro_template.body {
-                        let mut expanded = body_line.clone();
-                        for (p_idx, param_name) in macro_template.params.iter().enumerate() {
-                            if let Some(arg_val) = args.get(p_idx) {
-                                expanded = expanded.replace(&format!(":{}:", param_name), arg_val);
-                                expanded = expanded.replace(param_name, arg_val);
-                            }
-                        }
+                        let mut expanded = substitute_macro_parameters(
+                            body_line,
+                            &macro_template.params,
+                            &args,
+                        );
 
                         let mut question_index = expanded.find('?');
                         while let Some(index) = question_index {
@@ -920,7 +968,7 @@ impl Assembler {
                 let name = parts[0].to_string();
                 let args_text = trimmed[name.len()..].trim();
                 let mut args = parser::split_asm_operands(args_text);
-                if name.eq_ignore_ascii_case(".WORD") {
+                if name.eq_ignore_ascii_case(".WORD") || name.eq_ignore_ascii_case(".LONG") {
                     for arg in &mut args {
                         *arg = arg.trim_start_matches('#').trim().to_string();
                     }
@@ -928,6 +976,8 @@ impl Assembler {
 
                 if name.eq_ignore_ascii_case(".WORD") {
                     self.current_address += (args.len() * 2) as u32;
+                } else if name.eq_ignore_ascii_case(".LONG") {
+                    self.current_address += (args.len() * 4) as u32;
                 }
                 if name.eq_ignore_ascii_case(".asg") || name.eq_ignore_ascii_case(".eval") {
                     if let Some(arg) = args.first() {
@@ -1133,6 +1183,9 @@ impl Assembler {
                     Instruction::Equ { .. } => {}
                     Instruction::Directive { name, args } if name.eq_ignore_ascii_case(".WORD") => {
                         address += (args.len() * 2) as u32;
+                    }
+                    Instruction::Directive { name, args } if name.eq_ignore_ascii_case(".LONG") => {
+                        address += (args.len() * 4) as u32;
                     }
                     _ => {
                         let size = layout_instruction_size(instruction, address, &self.symbol_table);

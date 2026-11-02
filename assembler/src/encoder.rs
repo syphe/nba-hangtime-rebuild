@@ -84,26 +84,24 @@ pub fn encode_instruction(
             // .usect allocates uninitialized RAM space; no ROM bytes emitted
         }
         ParsedInstruction::Directive { name, args } => {
-            if name.eq_ignore_ascii_case(".WORD") {
+            if name.eq_ignore_ascii_case(".WORD") || name.eq_ignore_ascii_case(".LONG") {
+                let long = name.eq_ignore_ascii_case(".LONG");
                 for arg in args {
-                    let val: Result<i32, EncodeError> = if let Some(hex_str) = arg.strip_prefix('$')
-                    {
-                        u16::from_str_radix(hex_str, 16)
-                            .map(|v| v as i32)
-                            .map_err(|_| EncodeError::InvalidDirectiveArg(arg.clone()))
-                    } else if let Some(hex_str) = arg.strip_prefix("0x") {
-                        u16::from_str_radix(hex_str, 16)
-                            .map(|v| v as i32)
-                            .map_err(|_| EncodeError::InvalidDirectiveArg(arg.clone()))
+                    let value = if let Some(hex_str) = arg.strip_prefix('$') {
+                        i32::from_str_radix(hex_str, 16)
+                            .map_err(|_| EncodeError::InvalidDirectiveArg(arg.clone()))?
+                    } else if let Some(hex_str) = arg.strip_prefix("0x").or_else(|| arg.strip_prefix("0X")) {
+                        i32::from_str_radix(hex_str, 16)
+                            .map_err(|_| EncodeError::InvalidDirectiveArg(arg.clone()))?
                     } else if let Ok(n) = arg.parse::<i32>() {
-                        Ok(n)
+                        n
                     } else {
-                        Ok(resolve_immed_expr_part(arg, symbols).unwrap_or(0))
+                        resolve_immed_expr_part(arg, symbols).unwrap_or(0)
                     };
-
-                    match val {
-                        Ok(v) => bytes.extend_from_slice(&(v as u16).to_le_bytes()),
-                        Err(e) => return Err(e),
+                    if long {
+                        bytes.extend_from_slice(&(value as u32).to_le_bytes());
+                    } else {
+                        bytes.extend_from_slice(&(value as u16).to_le_bytes());
                     }
                 }
             }

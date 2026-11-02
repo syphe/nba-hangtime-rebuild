@@ -79,6 +79,7 @@ $dependencies = @{
     SPEECH = @("imgtbl2.glo")
     ADJUST = @("menu.equ")
     MPROC = @("mproc.equ")
+    IMGTBL = @("imgtbl.glo", "fonttbl.glo", "roboimg.glo", "bgndtbl.glo")
     TEXT = @("text.tbl", "mugshot.tbl")
     UNZIP = @("bbvda.tbl")
 }
