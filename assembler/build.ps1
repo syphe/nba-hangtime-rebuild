@@ -11,6 +11,7 @@ $repoRoot = Split-Path -Parent $assemblerDir
 $sourceDir = Join-Path $repoRoot "SRC"
 $outputDir = Join-Path $assemblerDir "build"
 $exe = Join-Path $assemblerDir "target\debug\tms34010-asm.exe"
+$assemblerSources = @(Get-ChildItem -LiteralPath (Join-Path $assemblerDir "src") -Filter "*.rs" -File | ForEach-Object { $_.FullName })
 
 if ($Clean) {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $outputDir
@@ -98,6 +99,7 @@ foreach ($module in $modules) {
 
     $object = Join-Path $outputDir "$module.OBJ"
     $inputs = @($source.FullName)
+    $inputs += $assemblerSources
     foreach ($dependency in $dependencies[$module]) {
         $dependencyFile = Find-SourceFile $dependency
         if ($dependencyFile) { $inputs += $dependencyFile.FullName }
@@ -142,7 +144,13 @@ if ($ObjectFormat) {
             $object = Join-Path $outputDir "$module.OBJ"
             if (Test-Path $object) { $object }
         }
-            & python link.py @objects --cmd-file (Join-Path $sourceDir "BB.CMD") --output (Join-Path $outputDir "BB.bin")
+        & python link.py @objects --cmd-file (Join-Path $sourceDir "BB.CMD") `
+            --output (Join-Path $outputDir "BB.bin") `
+            --coff-output (Join-Path $outputDir "BB.OUT")
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & python rom_split.py (Join-Path $outputDir "BB.bin") `
+            --output-dir (Join-Path $outputDir "ROM") `
+            --reference (Join-Path $repoRoot "BACKUP\XCODE101L\ROM\ROM_MINE.bin")
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     finally {

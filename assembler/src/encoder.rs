@@ -46,7 +46,13 @@ fn encode_conditional_relative(
         return Ok(());
     }
     let long_words = (target_addr as i64 - (current_addr + 4) as i64) / 2;
-    if long_words < i16::MIN as i64 || long_words > i16::MAX as i64 || long_words == 0 {
+    if long_words < i16::MIN as i64 || long_words > i16::MAX as i64 {
+        bytes.extend_from_slice(&(0xC080 | (condition << 8)).to_le_bytes());
+        bytes.extend_from_slice(&(target_addr as u16).to_le_bytes());
+        bytes.extend_from_slice(&((target_addr >> 16) as u16).to_le_bytes());
+        return Ok(());
+    }
+    if long_words == 0 {
         return Err(EncodeError::BranchOutOfRange {
             label: label.to_string(), addr: current_addr, offset: long_words as i32,
         });
@@ -103,8 +109,6 @@ pub fn encode_instruction(
             }
         }
         ParsedInstruction::Jr { label }
-        | ParsedInstruction::Call { label }
-        | ParsedInstruction::Callr { label }
         | ParsedInstruction::Jeq { label }
         | ParsedInstruction::Jne { label } => {
             let target_addr = symbols
@@ -117,7 +121,6 @@ pub fn encode_instruction(
                 ParsedInstruction::Jr { .. } => (0x6000, Some(0x0)),
                 ParsedInstruction::Jeq { .. } => (0x6A00, Some(0xA)),
                 ParsedInstruction::Jne { .. } => (0x6B00, Some(0xB)),
-                ParsedInstruction::Call { .. } | ParsedInstruction::Callr { .. } => (0xEF00, None),
                 _ => unreachable!(),
             };
             let short_delta = target_addr as i64 - (current_addr + 2) as i64;
@@ -146,6 +149,48 @@ pub fn encode_instruction(
                 return Err(EncodeError::BranchOutOfRange {
                     label: label.clone(), addr: current_addr, offset: short_words as i32,
                 });
+            }
+        }
+        ParsedInstruction::Jrcc { condition, target } => {
+            let target_addr = symbols.get(target).or_else(|| symbols.get_ignore_case(target))
+                .copied().unwrap_or(current_addr);
+            let short_words = (target_addr as i64 - (current_addr + 2) as i64) / 2;
+            encode_conditional_relative(&mut bytes, *condition as u16, short_words, target_addr, current_addr, target)?;
+        }
+        ParsedInstruction::Jacc { condition, target } => {
+            let target_addr = symbols.get(target).or_else(|| symbols.get_ignore_case(target))
+                .copied().unwrap_or(current_addr);
+            bytes.extend_from_slice(&(0xC080 | ((*condition as u16) << 8)).to_le_bytes());
+            bytes.extend_from_slice(&(target_addr as u16).to_le_bytes());
+            bytes.extend_from_slice(&((target_addr >> 16) as u16).to_le_bytes());
+        }
+        ParsedInstruction::LongJrcc { condition, target } => {
+            let target_addr = symbols.get(target).or_else(|| symbols.get_ignore_case(target))
+                .copied().unwrap_or(current_addr);
+            let relative = (target_addr as i64 - (current_addr + 4) as i64) / 2;
+            if relative == 0 {
+                bytes.extend_from_slice(&0x0000u16.to_le_bytes());
+                bytes.extend_from_slice(&0x0000u16.to_le_bytes());
+            } else if relative < i16::MIN as i64 || relative > i16::MAX as i64 {
+                bytes.extend_from_slice(&(0xC080 | ((*condition as u16) << 8)).to_le_bytes());
+                bytes.extend_from_slice(&(target_addr as u16).to_le_bytes());
+                bytes.extend_from_slice(&((target_addr >> 16) as u16).to_le_bytes());
+            } else {
+                bytes.extend_from_slice(&(0xC000 | ((*condition as u16) << 8)).to_le_bytes());
+                bytes.extend_from_slice(&(relative as i16).to_le_bytes());
+            }
+        }
+        ParsedInstruction::Call { label } | ParsedInstruction::Callr { label } => {
+            let target_addr = symbols.get(label).or_else(|| symbols.get_ignore_case(label))
+                .copied().unwrap_or(current_addr);
+            let relative = (target_addr as i64 - (current_addr + 4) as i64) / 2;
+            if relative < i16::MIN as i64 || relative > i16::MAX as i64 {
+                bytes.extend_from_slice(&0xEB00u16.to_le_bytes());
+                bytes.extend_from_slice(&(target_addr as u16).to_le_bytes());
+                bytes.extend_from_slice(&((target_addr >> 16) as u16).to_le_bytes());
+            } else {
+                bytes.extend_from_slice(&0x0D3Fu16.to_le_bytes());
+                bytes.extend_from_slice(&(relative as i16).to_le_bytes());
             }
         }
         ParsedInstruction::Move { src, dst, field } => {

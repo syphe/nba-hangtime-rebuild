@@ -9,8 +9,9 @@ import re
 import struct
 from pathlib import Path
 
-ROM_BASE = 0xFF800000
-ROM_LENGTH = 0x7F6F00
+ROM_BASE = 0xFF800000  # TMS34010 bit address, as used by BB.CMD
+ROM_LENGTH_BITS = 0x7F6F00
+ROM_LENGTH_BYTES = ROM_LENGTH_BITS // 8
 FILL = 0xFF
 
 
@@ -34,6 +35,56 @@ def order_from_cmd(objects, cmd_path: Path):
     # after all explicitly ordered legacy inputs.
     ordered.extend(item for item in objects if item[0].name.upper() not in used)
     return ordered
+
+
+def rom_region(cmd_path: Path | None):
+    if not cmd_path:
+        return ROM_BASE, ROM_LENGTH_BITS
+    text = cmd_path.read_text(errors="replace")
+    match = re.search(
+        r"\bROM\s*:\s*org\s*=\s*(0x[0-9A-Fa-f]+|[0-9A-Fa-f]+)\s*,\s*len\s*=\s*(0x[0-9A-Fa-f]+|[0-9A-Fa-f]+)",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        raise ValueError(f"{cmd_path}: could not find the ROM memory region")
+    return tuple(int(value, 0) if value.lower().startswith("0x") else int(value, 16) for value in match.groups())
+
+
+def write_tms34010_coff(path: Path, text: bytes, data: bytes, rom_base: int, entry: int):
+    """Write a linked TMS34010 COFF image for the legacy bigsrec converter."""
+    section_specs = [
+        ("VECTORS", 0xFFFFFC00, b"", 0x40),
+        ("IMAGES", 0x02000000, b"", 0x0),
+        ("shit", 0xFFFF6F00, b"", 0x0),
+        ("SHIT", 0xFFFF6F00, b"", 0x0),
+        ("STACK", 0x01000000, b"", 0x40),
+        ("PRCBSS", 0x01002000, b"", 0x40),
+        ("OBJBSS", 0x01002040, b"", 0x40),
+        (".BSS", 0x010020A0, b"", 0x0),
+        (".bss", 0x010020A0, b"", 0x80),
+        (".text", rom_base, text, 0x920),
+        (".TEXT", rom_base, b"", 0x0),
+        (".data", rom_base + len(text) * 8, data, 0x40),
+        (".DATA", rom_base, b"", 0x0),
+        ("img_tbl", rom_base, b"", 0x0),
+    ]
+    header_size = 20 + 28 + len(section_specs) * 40
+    text_pointer = header_size
+    data_pointer = text_pointer + len(text)
+    out = bytearray(struct.pack("<HHIIIHH", 0x0090, len(section_specs), 0, 0, 0, 28, 0x011F))
+    out.extend(struct.pack("<HHIIIIII", 0x0108, 0x0262, len(text) * 8, len(data) * 8, 0, entry, rom_base, rom_base + len(text) * 8))
+    for name, address, payload, flags in section_specs:
+        pointer = text_pointer if name == ".text" and payload else data_pointer if name == ".data" and payload else 0
+        out.extend(struct.pack(
+            "<8sIIIIIIHHI",
+            name.encode("ascii")[:8].ljust(8, b"\0"), address, address,
+            len(payload) * 8, pointer, 0, 0, 0, 0, flags,
+        ))
+    out.extend(text)
+    out.extend(data)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(out)
 
 
 def section_name(name: str) -> str:
@@ -107,12 +158,17 @@ def main():
     parser.add_argument("objects", nargs="+", type=Path)
     parser.add_argument("--output", type=Path, default=Path("build/BB.bin"))
     parser.add_argument("--cmd-file", type=Path)
+    parser.add_argument("--coff-output", type=Path)
     args = parser.parse_args()
 
     objects = load_objects(args.objects)
     if args.cmd_file:
         objects = order_from_cmd(objects, args.cmd_file)
-    text_cursor = ROM_BASE
+    rom_base, rom_length_bits = rom_region(args.cmd_file)
+    if rom_base % 8 or rom_length_bits % 8:
+        raise ValueError("ROM base and length must be byte aligned")
+    rom_length_bytes = rom_length_bits // 8
+    text_cursor = rom_base
     symbols = {}
     symbol_kinds = {}
     placements = []
@@ -123,17 +179,17 @@ def main():
         for section in obj.get("sections", [])
         if section_name(section["name"]) == "text"
     )
-    data_cursor = ROM_BASE + text_size
+    data_cursor = rom_base + text_size * 8
     total_rom_size = text_size + sum(
         len(base64.b64decode(section["data"]))
         for _, obj in objects
         for section in obj.get("sections", [])
         if section_name(section["name"]) == "data"
     )
-    if total_rom_size > ROM_LENGTH:
+    if total_rom_size * 8 > rom_length_bits:
         raise ValueError(
-            f"text/data sections require 0x{total_rom_size:X} bytes, "
-            f"exceeding the BB.CMD ROM region (0x{ROM_LENGTH:X})"
+            f"text/data sections require 0x{total_rom_size * 8:X} bits, "
+            f"exceeding the BB.CMD ROM region (0x{rom_length_bits:X} bits)"
         )
 
     for path, obj in objects:
@@ -143,11 +199,13 @@ def main():
             data = base64.b64decode(section["data"])
             if name == "text":
                 section_addresses[name] = text_cursor
-                text_cursor += len(data)
+                text_cursor += len(data) * 8
             elif name == "data":
                 section_addresses[name] = data_cursor
-                data_cursor += len(data)
+                data_cursor += len(data) * 8
             else:
+                if data:
+                    raise ValueError(f"{path}: initialized section {section['name']!r} has no BB.CMD placement")
                 section_addresses[name] = 0
 
         placements.append((path, obj, section_addresses))
@@ -156,7 +214,7 @@ def main():
             name = symbol["name"].lower()
             address = None
             if section in section_addresses:
-                address = section_addresses[section] + symbol.get("section_offset", 0)
+                address = section_addresses[section] + symbol.get("section_offset", 0) * 8
             elif symbol.get("section") == "" and symbol.get("kind") == "symbol":
                 address = symbol.get("address", 0)
             if address is None:
@@ -172,7 +230,7 @@ def main():
                 symbols[name] = address
                 symbol_kinds[name] = "absolute"
 
-    rom = bytearray([FILL]) * ROM_LENGTH
+    rom = bytearray([FILL]) * rom_length_bytes
 
     # Copy section payloads into the flat ROM image.
     for path, obj, addresses in placements:
@@ -184,7 +242,9 @@ def main():
             address = addresses[name]
             if address == 0:
                 continue
-            start = address - ROM_BASE
+            if (address - rom_base) % 8:
+                raise ValueError(f"{path}: section {name} is not byte aligned")
+            start = (address - rom_base) // 8
             if start < 0 or start + len(data) > len(rom):
                 raise ValueError(f"{path}: section {name} is outside the ROM image")
             rom[start:start + len(data)] = data
@@ -195,51 +255,61 @@ def main():
     # Apply the short relative fixups emitted in object format.
     for path, obj, addresses in placements:
         section_addresses = addresses
+        object_symbols = dict(symbols)
+        for symbol in obj.get("symbols", []):
+            section_name_value = section_name(symbol.get("section", "")) if symbol.get("section") else ""
+            if section_name_value in section_addresses:
+                value = section_addresses[section_name_value] + symbol.get("section_offset", 0) * 8
+            elif not symbol.get("section") and symbol.get("kind") == "symbol":
+                value = symbol.get("address", 0)
+            else:
+                continue
+            object_symbols[symbol["name"].lower()] = value
         for fixup in obj.get("fixups", []):
             section = section_name(fixup["section"])
             if section not in ("text", "data") or section not in section_addresses:
                 continue
             try:
-                target = resolve_expression(fixup["symbol"], symbols)
+                target = resolve_expression(fixup["symbol"], object_symbols)
             except ValueError:
                 if fixup["symbol"].lower() not in implicit_local_labels:
                     unresolved_fixups.append((path, fixup["symbol"]))
                 continue
-            source = section_addresses[section] + fixup["offset"]
+            source = section_addresses[section] + fixup["offset"] * 8
             if fixup.get("kind") in ("absolute16", "absolute32"):
                 width = 2 if fixup["kind"] == "absolute16" else 4
-                start = source - ROM_BASE
+                start = (source - rom_base) // 8
                 if start < 0 or start + width > len(rom):
                     raise ValueError(f"{path}: absolute fixup is outside the ROM image")
                 if width == 2:
                     rom[start:start + 2] = struct.pack("<H", target & 0xFFFF)
                 else:
-                    if target < 0 or target > 0xFFFFFFFF:
+                    if target < -0x80000000 or target > 0xFFFFFFFF:
                         raise ValueError(
                             f"{path}: absolute fixup {fixup['symbol']!r} resolved to out-of-range address 0x{target:X}"
                         )
-                    rom[start:start + 4] = struct.pack("<I", target)
+                    rom[start:start + 4] = struct.pack("<I", target & 0xFFFFFFFF)
                 continue
             if fixup.get("kind") == "tms34010-relative16":
-                relative = (target - (source + 2)) // 2
+                relative = (target - (source + 16)) // 16
                 if relative < -32768 or relative > 32767:
                     raise ValueError(
                         f"{path}: long relative relocation {fixup['symbol']!r} at 0x{source:X} "
                         f"is out of range ({relative} words; expected -32768..32767)"
                     )
-                start = source - ROM_BASE
+                start = (source - rom_base) // 8
                 if start < 0 or start + 2 > len(rom):
                     raise ValueError(f"{path}: long relative fixup is outside the ROM image")
                 rom[start:start + 2] = struct.pack("<h", relative)
                 continue
-            relative = (target - (source + 2)) // 2
+            relative = (target - (source + 16)) // 16
             if relative < -128 or relative > 127:
                 raise ValueError(
                     f"{path}: relative relocation {fixup['symbol']!r} at 0x{source:X} "
                     f"is out of range ({relative} words; expected -128..127)"
                 )
             short_relative_count += 1
-            start = source - ROM_BASE
+            start = (source - rom_base) // 8
             if start < 0 or start + 2 > len(rom):
                 raise ValueError(f"{path}: fixup is outside the ROM image")
             rom[start + 1] = relative & 0xFF
@@ -254,6 +324,23 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(rom)
     print(f"Wrote {output} ({len(rom)} bytes)")
+    if args.coff_output:
+        linked_text = b"".join(
+            base64.b64decode(section["data"])
+            for _, obj in objects
+            for section in obj.get("sections", [])
+            if section_name(section["name"]) == "text"
+        )
+        linked_data = b"".join(
+            base64.b64decode(section["data"])
+            for _, obj in objects
+            for section in obj.get("sections", [])
+            if section_name(section["name"]) == "data"
+        )
+        write_tms34010_coff(
+            args.coff_output.resolve(), linked_text, linked_data, rom_base, symbols.get("init_prog", 0)
+        )
+        print(f"Wrote linked TMS34010 COFF {args.coff_output.resolve()}")
 
 
 if __name__ == "__main__":

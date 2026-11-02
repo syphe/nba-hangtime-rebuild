@@ -65,15 +65,18 @@ A modern, native Rust assembler designed for the TMS34010 arcade graphics proces
 - The encoder now promotes supported unconditional, equal/not-equal, less-than, and greater-than relative branches to the TMS34010 two-word, signed 16-bit `JRcc` form when the short displacement is out of range. Pass one repeats label/equate layout until branch-size changes settle. Object files mark expanded branch operands as `tms34010-relative16`, and `link.py` resolves and range-checks those fixups. Relative calls still reject short-range overflow; remaining conditional mnemonics need condition-code preservation in the parser, and targets beyond the long relative range need `JAcc` support.
 - Object generation emits `absolute16` fixups for `.WORD` expressions containing symbols; symbolic `MOVI` operands use the existing `absolute32` fixup path. The linker applies both widths.
 - The experimental linker can now take `--cmd-file SRC/BB.CMD`; `build.ps1 -ObjectFormat` passes that file so legacy-listed modules are placed in command-file order, with additional modules appended afterward. It also rejects text/data payloads larger than the ROM region defined by `BB.CMD` (origin `0xFF800000`, length `0x7F6F00`). The legacy map confirms separate packed `.text` then `.data` ranges; byte-for-byte layout reconciliation has not yet been completed.
+- The parser now treats the legacy `JSRP target` pseudo-instruction as `CALLR target`, including both opcode-detection paths used for labels. Object generation therefore records its relocation as a signed 16-bit relative call instead of the unsupported short-relative form that previously stopped linking at `FRANIMQ`.
+- `link.py` now gives each object's own local symbols precedence over same-named symbols from other modules during relocation expression evaluation, and accepts negative absolute 32-bit expressions as two's-complement values.
+- The toolchain now includes a TI COFF `BB.OUT` writer and a native program-ROM split/combine utility. `build.ps1 -ObjectFormat` invokes both after linking and compares the combined ROM with `BACKUP/XCODE101L/ROM/ROM_MINE.bin`. These outputs have not yet been validated by a completed end-to-end run in this session.
+- A rebuild after the `JSRP` parser change started recompiling the module set but did not complete within the command window. Subsequent `cargo build` attempts were blocked because Windows returned “Access is denied” while replacing `target/debug/tms34010-asm.exe`; no linker or ROM comparison result was produced from that run.
 
 ## 6. Next Steps
 
 The next implementation steps are:
 
-1. Complete long-range control-flow relocation coverage for relative calls, all parsed conditional mnemonics, and targets requiring `JAcc`.
-2. Validate linker section addresses and sizes against all entries in `SRC/BB.CMD` and `BACKUP/XCODE101L/BB.MAP`, including initialized vectors and uninitialized memory sections.
-3. Generate `BB.OUT` in a format compatible with the legacy ROM conversion tools.
-4. Add native ROM conversion/splitting to `assembler/build.ps1` and compare output with the DOSBox reference artifacts byte-for-byte.
-5. Keep graphics replacement and GSP changes separate until the program-ROM linker passes byte comparison.
+1. Complete a clean full-object build and link; verify `JSRP` relocations and fix any newly exposed relocation or expression failures.
+2. Validate linker section addresses and sizes against all entries in `SRC/BB.CMD` and `BACKUP/XCODE101L/BB.MAP`, including initialized vectors and uninitialized memory sections. The current object format does not yet carry enough allocation metadata to claim BSS/vector correctness.
+3. Validate generated `BB.OUT` using the legacy ROM conversion tools or a known-good COFF reader, then compare the native combined ROM with the DOSBox reference byte-for-byte and investigate mismatches.
+4. Keep graphics replacement and GSP changes separate until the program-ROM linker passes byte comparison.
 
 Graphics replacement remains separate and must not be included in the linker implementation commit.

@@ -101,6 +101,18 @@ pub enum ParsedInstruction {
     Jr {
         label: String,
     },
+    Jrcc {
+        condition: u8,
+        target: String,
+    },
+    Jacc {
+        condition: u8,
+        target: String,
+    },
+    LongJrcc {
+        condition: u8,
+        target: String,
+    },
     Call {
         label: String,
     },
@@ -549,12 +561,26 @@ pub fn parse_relative_conditional(input: &str) -> IResult<&str, ParsedInstructio
     }
     let (input, _) = multispace1(input)?;
     let (input, label) = parse_identifier(input)?;
-    Ok((
-        input,
-        ParsedInstruction::Jr {
-            label: label.to_string(),
-        },
-    ))
+    let condition = match mnemonic.to_ascii_uppercase().as_str() {
+        "JRUC" | "JR" => 0x0,
+        "JRP" => 0x1,
+        "JRLS" => 0x2,
+        "JRHI" => 0x3,
+        "JRLT" | "JLT" => 0x4,
+        "JRGE" => 0x5,
+        "JRLE" => 0x6,
+        "JRGT" | "JGT" => 0x7,
+        "JRLO" | "JRC" | "JRB" => 0x8,
+        "JRHS" | "JRNC" | "JRNB" => 0x9,
+        "JREQ" | "JRZ" | "JEQ" => 0xA,
+        "JRNE" | "JRNZ" | "JNE" => 0xB,
+        "JRV" | "JAV" => 0xC,
+        "JRNV" | "JANV" => 0xD,
+        "JRN" | "JAN" => 0xE,
+        "JRNN" | "JANN" => 0xF,
+        _ => return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))),
+    };
+    Ok((input, ParsedInstruction::Jrcc { condition, target: label.to_string() }))
 }
 
 /// Parse a CALL instruction (e.g., "CALL SUBROUTINE")
@@ -601,9 +627,7 @@ pub fn parse_jahs(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, label) = parse_identifier(input)?;
     Ok((
         input,
-        ParsedInstruction::Jr {
-            label: label.to_string(),
-        },
+        ParsedInstruction::Jacc { condition: 0x9, target: label.to_string() },
     ))
 }
 
@@ -1385,7 +1409,7 @@ pub fn parse_btst(input: &str) -> IResult<&str, ParsedInstruction> {
 
 /// Parse CALLR instruction (e.g., "CALLR io_init")
 pub fn parse_callr(input: &str) -> IResult<&str, ParsedInstruction> {
-    let (input, _) = tag_no_case("CALLR")(input)?;
+    let (input, _) = alt((tag_no_case("CALLR"), tag_no_case("JSRP")))(input)?;
     let (input, _) = multispace1(input)?;
     let (input, label) = take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.')(input)?;
 

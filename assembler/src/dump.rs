@@ -104,6 +104,9 @@ fn describe(instr: &ParsedInstruction) -> String {
             format!("SRA {}, {}", fmt_operand(src), fmt_operand(dst))
         }
         ParsedInstruction::Jr { label } => format!("JR {}", label),
+        ParsedInstruction::Jrcc { condition, target } => format!("JRcc[{:X}] {}", condition, target),
+        ParsedInstruction::Jacc { condition, target } => format!("JAcc[{:X}] {}", condition, target),
+        ParsedInstruction::LongJrcc { condition, target } => format!("Long JRcc[{:X}] {}", condition, target),
         ParsedInstruction::Call { label } => format!("CALL {}", label),
         ParsedInstruction::Jeq { label } => format!("JEQ {}", label),
         ParsedInstruction::Jne { label } => format!("JNE {}", label),
@@ -230,26 +233,58 @@ pub fn verify(
         match instr {
             ParsedInstruction::Jr { label }
             | ParsedInstruction::Call { label }
+            | ParsedInstruction::Callr { label }
             | ParsedInstruction::Jeq { label }
             | ParsedInstruction::Jne { label } => {
-                let w = word(slice);
-                let offset = (w & 0x00FF) as i8;
-                let target = (addr as i32 + 2) + (offset as i32) * 2;
                 let expected = *symbols
                     .get(label)
                     .ok_or_else(|| EncodeError::UndefinedLabel(label.clone()))?;
+                let target = if slice.len() == 6 {
+                    u32::from_le_bytes([slice[2], slice[3], slice[4], slice[5]]) as i32
+                } else if slice.len() == 4 {
+                    let offset = i16::from_le_bytes([slice[2], slice[3]]) as i32;
+                    addr as i32 + 4 + offset * 2
+                } else {
+                    let offset = (word(slice) & 0x00FF) as i8 as i32;
+                    addr as i32 + 2 + offset * 2
+                };
                 results.push((
                     target == expected as i32,
                     format!(
-                        "{} @ {:04X}: offset {:>3} ({} words) -> target {:04X}, symbol {:04X}",
+                        "{} @ {:04X}: target {:04X}, symbol {:04X}",
                         describe(instr),
                         addr,
-                        offset,
-                        offset,
                         target,
                         expected
                     ),
                 ));
+            }
+            ParsedInstruction::Jacc { target: label, .. } => {
+                let expected = *symbols.get(label)
+                    .ok_or_else(|| EncodeError::UndefinedLabel(label.clone()))?;
+                let actual = u32::from_le_bytes([slice[2], slice[3], slice[4], slice[5]]);
+                results.push((actual == expected, format!(
+                    "{} @ {:04X}: target {:08X}, symbol {:08X}", describe(instr), addr, actual, expected
+                )));
+            }
+            ParsedInstruction::Jrcc { target: label, .. }
+            | ParsedInstruction::LongJrcc { target: label, .. }
+            | ParsedInstruction::Jlt { target: label }
+            | ParsedInstruction::Jgt { target: label } => {
+                let expected = *symbols.get(label)
+                    .ok_or_else(|| EncodeError::UndefinedLabel(label.clone()))?;
+                let target = if slice.len() == 6 {
+                    u32::from_le_bytes([slice[2], slice[3], slice[4], slice[5]]) as i32
+                } else if slice.len() == 4 {
+                    let offset = i16::from_le_bytes([slice[2], slice[3]]) as i32;
+                    addr as i32 + 4 + offset * 2
+                } else {
+                    let offset = (word(slice) & 0x00FF) as i8 as i32;
+                    addr as i32 + 2 + offset * 2
+                };
+                results.push((target == expected as i32, format!(
+                    "{} @ {:04X}: target {:04X}, symbol {:04X}", describe(instr), addr, target, expected
+                )));
             }
             ParsedInstruction::Move { src, dst, field } => {
                 if matches!(src, Operand::Immediate(_) | Operand::Symbol(_)) {

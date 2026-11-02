@@ -209,6 +209,8 @@ impl ObjectFile {
                 | Instruction::Jeq { label }
                 | Instruction::Jne { label } => Some(label.as_str()),
                 Instruction::Jlt { target } | Instruction::Jgt { target } => Some(target.as_str()),
+                Instruction::Jrcc { target, .. } => Some(target.as_str()),
+                Instruction::Jacc { target, .. } | Instruction::LongJrcc { target, .. } => Some(target.as_str()),
                 Instruction::Jmp { target } => match target {
                     Operand::Symbol(name) => Some(name.as_str()),
                     _ => None,
@@ -234,9 +236,15 @@ impl ObjectFile {
                             | Instruction::Jne { .. }
                             | Instruction::Jlt { .. }
                             | Instruction::Jgt { .. }
+                            | Instruction::Jrcc { .. }
+                            | Instruction::LongJrcc { .. }
                     );
                     let kind = match &instruction {
                         Instruction::Calla { .. } | Instruction::Move { .. } => "absolute32",
+                        Instruction::Jacc { .. } => "absolute32",
+                        _ if matches!(instruction, Instruction::Call { .. } | Instruction::Callr { .. }) && encoded.len() == 6 => "absolute32",
+                        _ if is_rel_branch && encoded.len() == 6 => "absolute32",
+                        Instruction::Call { .. } | Instruction::Callr { .. } => "tms34010-relative16",
                         _ if is_rel_branch && encoded.len() == 4 => "tms34010-relative16",
                         _ => "tms34010-relative",
                     };
@@ -321,6 +329,44 @@ impl SymbolTable {
 }
 
 pub type Instruction = parser::ParsedInstruction;
+
+fn layout_instruction_size(instruction: &Instruction, address: u32, symbols: &SymbolTable) -> u32 {
+    match instruction {
+        Instruction::Jr { .. } | Instruction::Jrcc { .. } | Instruction::Jeq { .. }
+        | Instruction::Jne { .. } | Instruction::Jlt { .. } | Instruction::Jgt { .. }
+        | Instruction::LongJrcc { .. } => {
+            encoder::encode_instruction(instruction, address, symbols)
+                .map(|bytes| bytes.len() as u32).unwrap_or(2)
+        }
+        Instruction::Label(_) | Instruction::Equ { .. } | Instruction::Usect { .. }
+        | Instruction::MacroDef { .. } | Instruction::MacroEnd => 0,
+        Instruction::Directive { name, args } if name.eq_ignore_ascii_case(".WORD") => (args.len() * 2) as u32,
+        Instruction::Directive { name, .. } if name.eq_ignore_ascii_case("MMTM") || name.eq_ignore_ascii_case("MMFM") => 4,
+        Instruction::Directive { .. } => 0,
+        Instruction::Move { src, dst, field, .. } => {
+            let mut extra = usize::from(matches!(src, Operand::Immediate(_) | Operand::Symbol(_)));
+            extra += usize::from(matches!(src, Operand::DirectMemory(_) | Operand::IndirectOffset(_, _)));
+            extra += usize::from(matches!(dst, Operand::DirectMemory(_) | Operand::IndirectOffset(_, _)));
+            extra += usize::from(field.is_some());
+            2 + (extra * 2) as u32
+        }
+        Instruction::Add { src, dst } | Instruction::Sub { src, dst }
+        | Instruction::Sll { src, dst } | Instruction::Srl { src, dst }
+        | Instruction::And { src, dst } | Instruction::Or { src, dst }
+        | Instruction::Xor { src, dst } => {
+            let mut extra = usize::from(matches!(src, Operand::Immediate(_) | Operand::Symbol(_)));
+            extra += usize::from(matches!(src, Operand::DirectMemory(_) | Operand::IndirectOffset(_, _)));
+            extra += usize::from(matches!(dst, Operand::DirectMemory(_) | Operand::IndirectOffset(_, _)));
+            2 + (extra * 2) as u32
+        }
+        Instruction::Cmp { src, .. } => if matches!(src, Operand::Immediate(_) | Operand::Symbol(_)) { 4 } else { 2 },
+        Instruction::Call { .. } | Instruction::Callr { .. } => 4,
+        Instruction::Calla { .. } | Instruction::Jacc { .. } => 6,
+        Instruction::Setf { .. } => 4,
+        Instruction::Jmp { .. } | Instruction::Rets => 2,
+        _ => 2,
+    }
+}
 
 pub struct Assembler {
     pub symbol_table: SymbolTable,
@@ -702,6 +748,7 @@ impl Assembler {
                             | "CALL"
                             | "CALLA"
                             | "CALLR"
+                            | "JSRP"
                             | "CALLI"
                             | "BTST"
                             | "CLR"
@@ -795,6 +842,7 @@ impl Assembler {
                                     | "CALL"
                                     | "CALLA"
                                     | "CALLR"
+                                    | "JSRP"
                                     | "CALLI"
                                     | "BTST"
                                     | "CLR"
@@ -952,12 +1000,6 @@ impl Assembler {
             if upper_pt_2.starts_with("MOVI") {
                 let remainder = parser_trimmed[4..].trim().trim_start_matches('#').trim();
                 parser_trimmed = format!("move\t#{}", remainder);
-            } else if upper_pt_2.starts_with("JRZ") {
-                let remainder = parser_trimmed[3..].trim();
-                parser_trimmed = format!("jeq\t{}", remainder);
-            } else if upper_pt_2.starts_with("JRN") {
-                let remainder = parser_trimmed[3..].trim();
-                parser_trimmed = format!("jlt\t{}", remainder);
             }
 
             match parser::parse_line(&parser_trimmed) {
@@ -1048,10 +1090,28 @@ impl Assembler {
 
         // Re-layout after labels and equates are known. Branches that promote to
         // the two-word form move later labels, so repeat until addresses settle.
-        for _ in 0..=ast.len() {
-            let previous_symbols = self.symbol_table.symbols.clone();
+        let mut latest_equates = HashMap::<String, String>::new();
+        for (name, expression) in pending_equates.drain(..) {
+            latest_equates.insert(name, expression);
+        }
+        let mut pending_equates: Vec<(String, String)> = latest_equates.into_iter().collect();
+        pending_equates.sort_by(|left, right| left.0.cmp(&right.0));
+        let layout_names: Vec<String> = ast.iter().filter_map(|instruction| {
+            if let Instruction::Label(name) = instruction { Some(name.clone()) } else { None }
+        }).collect();
+        let branch_count = ast.iter().filter(|instruction| matches!(
+            instruction,
+            Instruction::Jr { .. } | Instruction::Jrcc { .. } | Instruction::Jeq { .. }
+                | Instruction::Jne { .. } | Instruction::Jlt { .. } | Instruction::Jgt { .. }
+        )).count();
+        let max_layout_passes = branch_count + 3;
+        let mut layout_converged = false;
+        for _ in 0..max_layout_passes {
+            let previous_symbols: Vec<Option<u32>> = layout_names.iter().map(|name| {
+                self.symbol_table.get(name).copied()
+            }).collect();
             let mut address = 0u32;
-            for instruction in &ast {
+            for instruction in &mut ast {
                 match instruction {
                     Instruction::Label(name) => {
                         self.symbol_table.insert(name.clone(), address);
@@ -1061,27 +1121,71 @@ impl Assembler {
                         address += (args.len() * 2) as u32;
                     }
                     _ => {
-                        address += encoder::encode_instruction(
-                            instruction,
-                            address,
-                            &self.symbol_table,
-                        )
-                        .map(|bytes| bytes.len() as u32)
-                        .unwrap_or(2);
+                        let size = layout_instruction_size(instruction, address, &self.symbol_table);
+                        if size > 2 {
+                            let long_branch = match instruction {
+                                Instruction::Jr { label } => Some((0, label.clone())),
+                                Instruction::Jeq { label } => Some((0xA, label.clone())),
+                                Instruction::Jne { label } => Some((0xB, label.clone())),
+                                Instruction::Jlt { target } => Some((0x4, target.clone())),
+                                Instruction::Jgt { target } => Some((0x7, target.clone())),
+                                Instruction::Jrcc { condition, target } => Some((*condition, target.clone())),
+                                _ => None,
+                            };
+                            if let Some((condition, target)) = long_branch {
+                                *instruction = if size == 6 {
+                                    Instruction::Jacc { condition, target }
+                                } else {
+                                    Instruction::LongJrcc { condition, target }
+                                };
+                            }
+                        }
+                        address += size;
                     }
                 }
             }
 
             // Resolve forward and chained equates using the latest label layout.
-            let values: Vec<(String, u32)> = pending_equates.iter().map(|(name, expr)| {
-                let symbols: HashMap<String, u32> = self.symbol_table.symbols.iter()
+            let mut symbols: HashMap<String, u32> = self.symbol_table.symbols.iter()
                     .map(|(key, value)| (key.to_ascii_uppercase(), *value)).collect();
-                (name.clone(), parser::parse_expression_value(&format!(".equ {} {}", name, expr), &symbols) as u32)
+            // Legacy equate chains are shallow; cap malformed or cyclic chains
+            // so branch relaxation does not multiply their cost across every pass.
+            let max_equate_passes = pending_equates.len().min(16);
+            for _ in 0..max_equate_passes {
+                let values: Vec<(String, u32)> = pending_equates.iter().map(|(name, expr)| {
+                    (name.clone(), parser::parse_expression_value(&format!(".equ {} {}", name, expr), &symbols) as u32)
+                }).collect();
+                let changed = values.iter().any(|(name, value)| self.symbol_table.get(name) != Some(value));
+                for (name, value) in values {
+                    symbols.insert(name.to_ascii_uppercase(), value);
+                    self.symbol_table.insert(name, value);
+                }
+                if !changed { break; }
+            }
+            let current_symbols: Vec<Option<u32>> = layout_names.iter().map(|name| {
+                self.symbol_table.get(name).copied()
             }).collect();
-            for (name, value) in values { self.symbol_table.insert(name, value); }
-            if self.symbol_table.symbols == previous_symbols {
+            if current_symbols == previous_symbols {
+                layout_converged = true;
                 break;
             }
+        }
+        if !layout_converged && branch_count > 0 {
+            eprintln!("Warning: branch layout did not converge within {max_layout_passes} passes");
+        }
+        // Finish deeper equate chains once the final label addresses are known.
+        for _ in 0..256 {
+            let mut symbols: HashMap<String, u32> = self.symbol_table.symbols.iter()
+                .map(|(key, value)| (key.to_ascii_uppercase(), *value)).collect();
+            let values: Vec<(String, u32)> = pending_equates.iter().map(|(name, expr)| {
+                (name.clone(), parser::parse_expression_value(&format!(".equ {} {}", name, expr), &symbols) as u32)
+            }).collect();
+            let changed = values.iter().any(|(name, value)| self.symbol_table.get(name) != Some(value));
+            for (name, value) in values {
+                symbols.insert(name.to_ascii_uppercase(), value);
+                self.symbol_table.insert(name, value);
+            }
+            if !changed { break; }
         }
         Ok(ast)
     }
