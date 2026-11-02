@@ -475,6 +475,31 @@ mod loop_expression_tests {
     use super::*;
 
     #[test]
+    fn graphics_and_rotate_opcodes_match_reference_and_reject_invalid_modes() {
+        for (source, word) in [
+            ("andn a2,a3", 0x5243u16), ("andn b2,b3", 0x5253),
+            ("movx a2,a3", 0xec43), ("movy b2,b3", 0xee53),
+            ("rl 16,a4", 0x3204), ("rl 0,b4", 0x3014), ("rl 31,b4", 0x33f4),
+            ("rl a2,a3", 0x6843), ("rl b2,b3", 0x6853),
+            ("andn sp,b3", 0x53f3), ("andn b15,a3", 0x53e3),
+            ("fill L", 0x0fc0), ("fill XY", 0x0fe0),
+            ("pixt a2,*a3.XY", 0xf043), ("pixt *a2.XY,a3", 0xf243),
+            ("pixt *a2.XY,*a3.XY", 0xf443), ("pixt b2,*b3", 0xf853),
+            ("pixt *b2,b3", 0xfa53), ("pixt *b2,*b3", 0xfc53),
+        ] {
+            let mut assembler = Assembler::new();
+            let ast = assembler.pass_one(&[source]).unwrap();
+            assert_eq!(assembler.pass_two(&ast).unwrap(), word.to_le_bytes(), "{source}");
+        }
+        for source in ["andn a2,b3", "movx a2,b3", "rl 32,a3", "rl -1,a3", "rr 1,a3",
+                       "fill invalid", "pixt a2,a3", "pixt *a2.XY,*a3", "pixt a2,*b3"] {
+            let mut assembler = Assembler::new();
+            let ast = assembler.pass_one(&[source]).unwrap();
+            assert!(assembler.pass_two(&ast).is_err(), "{source}");
+        }
+    }
+
+    #[test]
     fn audited_opcodes_match_tms34010_reference_words() {
         // Golden words checked against MAME's 34010dsm.cpp and PAL.OBJ.
         for (source, words) in [

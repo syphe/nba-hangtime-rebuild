@@ -2,14 +2,14 @@
 
 ## Current checkpoint
 
-The native build/link/output pipeline works, but machine-code correctness is still incomplete. A strict link proves symbol resolution, not executable equivalence. **Prioritize an instruction-by-instruction encoder audit before further payload-size chasing.** Several instruction families still emit placeholder zero words or unaudited opcodes.
+The native build/link/output pipeline works, but machine-code correctness is still incomplete. A strict link proves symbol resolution, not executable equivalence. **Prioritize an instruction-by-instruction encoder audit before further payload-size chasing.** The former zero-word instruction placeholders have been replaced; many other instruction families still have unaudited encodings. Unsupported RR is now rejected explicitly.
 
 | Area | Latest verified state |
 | --- | --- |
 | Build/link | 51 modules, strict link with zero unresolved/out-of-range relocations |
 | Outputs | 14-section COFF, two 512 KiB ROM halves, combined 1 MiB ROM |
-| Regression checks | Four Rust tests pass, including golden opcode words and register aliases |
-| ROM comparison | 914,738 differing bytes; first difference at byte 0 |
+| Regression checks | Five Rust tests pass, including golden opcode words, graphics/pixel modes, and register aliases |
+| ROM comparison | 914,781 differing bytes; first difference at byte 0 |
 | Section extents | `.text` short by 18,068 bytes; `.data` short by 13,606 bytes; BSS 64 bytes over |
 | Proven data matches | TEXT both sections; PAL data with matching preserved inputs (non-relocation bytes and relocation sites) |
 | Baseline limitations | PAL/ATTRACT input differences; PLYRSEQ2 and BB3 preserved source do not fully reproduce their preserved objects |
@@ -136,14 +136,17 @@ A modern, native Rust assembler designed for the TMS34010 arcade graphics proces
 - Continued the primary MAME opcode audit: replaced zero placeholders for INC/DEC with the 1-constant ADDK/SUBK encodings (0x1020/0x1420 plus register bits), fixed NOT (0x03E0), TRAP (0x0900 plus validated 0..31 vector), and no-argument RETS (0x0960). Golden checks cover both register files, vector endpoints, and rejection of out-of-range vectors. All four Rust tests pass, and the complete 51-object strict build/link/ROM pipeline succeeds. Section extents are unchanged from the previous checkpoint; the ROM comparison now differs at 914,738 bytes. Opcode correctness is assessed against reference encodings, not by minimizing the count of differing ROM bytes.
 - Added `compare_outputs.py` and automatic post-build `comparison.html`/`comparison.json` generation. Verified 51 modules, 153 section contributions, 14 linked sections, and five output artifacts. Three Python tests pass for byte/heatmap accounting and safe report embedding; `node assembler/test_compare_outputs_ui.cjs assembler/build/comparison.html` checks table generation, module search, mismatch filtering, and sorting without a browser. Independently checked ROM mismatch counts and heatmap bucket sums against raw files. Browser visual preview was blocked by the browser URL policy for local files; no browser screenshot/render verification was performed. The offline report remains available for the user to open. `git diff --check` passes.
 
+- Replaced the remaining zero-word instruction placeholders using the primary MAME decoder: register ANDN (0x5200), MOVX/MOVY (0xEC00/0xEE00), register/immediate RL (0x6800/0x3000), FILL L/XY (0x0FC0/0x0FE0), and all six valid linear/XY PIXT addressing forms (0xF000/0xF200/0xF400/0xF800/0xFA00/0xFC00). New operand packing checks register-file compatibility while allowing the shared SP register. Invalid pixel mode combinations and rotate counts outside 0..31 fail explicitly. RR has no verified TMS34010 instruction encoding and now returns UnsupportedInstruction instead of emitting zero; the production sources contain no RR instructions. No graphics source/data files were changed.
+- Added a golden regression test with 19 valid opcode cases and nine invalid-mode cases, covering both register files, shared SP, all PIXT forms, rotate register/immediate counts, and explicit rejection. All five Rust tests pass. The complete 51-object build and strict zero-unresolved link succeed; output comparison HTML/JSON are regenerated automatically. Three Python report tests and the JavaScript table/search/filter/sort checks pass. Verified all 153 module contributions and ROM heatmap accounting. Latest ROM mismatch: 914,781 bytes, first at byte 0. Section extents are unchanged: text short by 18,068 bytes, data by 13,606, BSS 64 bytes over. `git diff --check` passes. No remaining instruction handler emits a literal zero placeholder, but many older opcode implementations still require independent auditing.
+
 
 ## 6. Next Steps
 
 The next implementation steps are:
 
-1. Continue the ISA audit with independent golden opcode tests and the primary MAME decoder/legacy objects. Urgent: instructions currently emitted as zero placeholders include ANDN, MOVX/MOVY, rotates, FILL, and PIXT. INC, DEC, NOT, TRAP, and no-argument RETS are now audited; other return/call forms remain to check. Audit branch/call/return forms, memory MOVE/addressing, immediate ALU forms, and shifts as well. Preserve relocation width/offset consistency when correcting sizes. Implement short MOVI only with matching layout/fixup support. Do not treat the current linked ROM as executable validation.
+1. Continue the ISA audit with independent golden opcode tests and the primary MAME decoder/legacy objects. Prioritize branch/call/return encodings together with their linker relocations, followed by memory MOVE/addressing, immediate ALU forms, shifts, and other existing instruction encodings. Zero-word placeholders have been removed; unsupported RR is rejected. Preserve relocation width/offset consistency when correcting sizes. Implement short MOVI only with matching layout/fixup support. Do not treat the current linked ROM as executable validation.
 2. Establish source baselines that actually match the preserved objects before interpreting section deficits as encoder bugs. PAL data is proven correct with preserved inputs; PLYRSEQ2/BB3 have confirmed baseline discrepancies. Classify PLYRAT3's data difference next when returning to this work. Keep using `compare_object.py`, including its explicit limitation for unsupported relocation kinds.
-3. After the code audit and source reconciliation, resolve the 64-byte BSS excess and compare vector/section ranges, then perform final byte and runtime validation. Latest ROM comparison: 914,738 differing bytes.
+3. After the code audit and source reconciliation, resolve the 64-byte BSS excess and compare vector/section ranges, then perform final byte and runtime validation. Latest ROM comparison: 914,781 differing bytes.
 4. Keep graphics replacement and GSP changes separate until the program-ROM linker passes byte comparison.
 
 Graphics replacement remains separate and must not be included in the linker implementation commit.

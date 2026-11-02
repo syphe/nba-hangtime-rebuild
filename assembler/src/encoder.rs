@@ -29,6 +29,17 @@ pub fn encode_register(reg: &Register) -> u8 {
     }
 }
 
+fn same_file_registers(src: &Register, dst: &Register) -> Result<u16, EncodeError> {
+    let s = encode_register(src) as u16;
+    let d = encode_register(dst) as u16;
+    // Register 15 is the shared stack pointer in either register file.
+    if (s ^ d) & 0x10 != 0 && s & 15 != 15 && d & 15 != 15 {
+        return Err(EncodeError::InvalidOperand);
+    }
+    let file = if s & 15 == 15 { d & 0x10 } else { s & 0x10 };
+    Ok(((s & 15) << 5) | (d & 15) | file)
+}
+
 fn encode_conditional_relative(
     bytes: &mut Vec<u8>,
     condition: u16,
@@ -488,13 +499,38 @@ pub fn encode_instruction(
             let base: u16 = if matches!(instr, ParsedInstruction::Inc { .. }) { 0x1020 } else { 0x1420 };
             bytes.extend_from_slice(&(base | encode_register(reg) as u16).to_le_bytes());
         }
-        ParsedInstruction::Andn { .. }
-        | ParsedInstruction::Movy { .. }
-        | ParsedInstruction::Movx { .. }
-        | ParsedInstruction::RotateLeft { .. }
-        | ParsedInstruction::RotateRight { .. }
-        | ParsedInstruction::Fill { .. } => {
-            bytes.extend_from_slice(&0x0000u16.to_le_bytes());
+        ParsedInstruction::Andn { src, dst }
+        | ParsedInstruction::Movy { src, dst }
+        | ParsedInstruction::Movx { src, dst } => {
+            let (Operand::Reg(s), Operand::Reg(d)) = (src, dst) else {
+                return Err(EncodeError::InvalidOperand);
+            };
+            let base = match instr {
+                ParsedInstruction::Andn { .. } => 0x5200,
+                ParsedInstruction::Movx { .. } => 0xEC00,
+                _ => 0xEE00,
+            };
+            bytes.extend_from_slice(&(base | same_file_registers(s, d)?).to_le_bytes());
+        }
+        ParsedInstruction::RotateLeft { src, dst } => {
+            let Operand::Reg(d) = dst else { return Err(EncodeError::InvalidOperand); };
+            let opcode = if let Operand::Reg(s) = src {
+                0x6800 | same_file_registers(s, d)?
+            } else {
+                let count = resolve_immediate(src, symbols)?;
+                if !(0..=31).contains(&count) { return Err(EncodeError::InvalidOperand); }
+                0x3000 | ((count as u16) << 5) | encode_register(d) as u16
+            };
+            bytes.extend_from_slice(&opcode.to_le_bytes());
+        }
+        ParsedInstruction::RotateRight { .. } => return Err(EncodeError::UnsupportedInstruction),
+        ParsedInstruction::Fill { field } => {
+            let opcode: u16 = match field.to_ascii_uppercase().as_str() {
+                "L" => 0x0FC0,
+                "XY" => 0x0FE0,
+                _ => return Err(EncodeError::InvalidOperand),
+            };
+            bytes.extend_from_slice(&opcode.to_le_bytes());
         }
         ParsedInstruction::Not { dst } => {
             if let Operand::Reg(reg) = dst {
@@ -505,8 +541,23 @@ pub fn encode_instruction(
                 return Err(EncodeError::UnsupportedInstruction);
             }
         }
-        ParsedInstruction::Pixt { .. } => {
-            bytes.extend_from_slice(&0x0000u16.to_le_bytes());
+        ParsedInstruction::Pixt { src, dst } => {
+            fn pixel_operand(operand: &Operand) -> Result<(&Register, u8), EncodeError> {
+                match operand {
+                    Operand::Reg(reg) => Ok((reg, 0)),
+                    Operand::Indirect(reg) => Ok((reg, 1)),
+                    Operand::IndirectField(reg, field) if field.eq_ignore_ascii_case(".XY") => Ok((reg, 2)),
+                    _ => Err(EncodeError::InvalidOperand),
+                }
+            }
+            let (s, source_mode) = pixel_operand(src)?;
+            let (d, destination_mode) = pixel_operand(dst)?;
+            let base = match (source_mode, destination_mode) {
+                (0, 2) => 0xF000, (2, 0) => 0xF200, (2, 2) => 0xF400,
+                (0, 1) => 0xF800, (1, 0) => 0xFA00, (1, 1) => 0xFC00,
+                _ => return Err(EncodeError::InvalidOperand),
+            };
+            bytes.extend_from_slice(&(base | same_file_registers(s, d)?).to_le_bytes());
         }
         ParsedInstruction::Movb { src, dst } => {
             match (src, dst) {
