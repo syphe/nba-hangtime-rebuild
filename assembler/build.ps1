@@ -99,7 +99,7 @@ foreach ($module in $modules) {
     }
 
     $object = Join-Path $outputDir "$module.OBJ"
-    $inputs = @($source.FullName)
+    $inputs = @($source.FullName, $exe)
     $inputs += $assemblerSources
     foreach ($dependency in $dependencies[$module]) {
         $dependencyFile = Find-SourceFile $dependency

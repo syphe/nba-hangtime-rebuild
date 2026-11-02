@@ -467,6 +467,32 @@ pub struct Assembler {
     pub symbol_table: SymbolTable,
     pub macro_table: HashMap<String, MacroTemplate>,
     current_address: u32,
+    assignment_aliases: HashMap<String, String>,
+}
+
+#[cfg(test)]
+mod loop_expression_tests {
+    use super::*;
+
+    #[test]
+    fn arithmetic_obeys_grouping_precedence_and_signed_division() {
+        let assembler = Assembler::new();
+        for (expression, expected) in [
+            ("(100-20)/16", 5), ("20-6-4", 10), ("2+3*4", 14),
+            ("1024/(8192/32)", 4), ("-20/-4", 5), ("0xffffffff+2", 1),
+        ] {
+            assert_eq!(assembler.eval_arithmetic(expression), expected, "{expression}");
+        }
+    }
+
+    #[test]
+    fn labeled_macro_loops_use_call_time_counts_and_freeze_each_iteration() {
+        let mut assembler = Assembler::new();
+        let source = "GEN .macro unused\n.loop COUNT\n.word N\n.eval N+1,N\n.endloop\n.endm\n.asg 3/8,FRACTION\n.eval 16*FRACTION,COUNT\n.eval 1,N\ntable GEN 0";
+        let ast = assembler.pass_one(&source.lines().collect::<Vec<_>>()).unwrap();
+        assert_eq!(assembler.symbol_table.get("table"), Some(&0));
+        assert_eq!(assembler.pass_two(&ast).unwrap(), vec![1,0,2,0,3,0,4,0,5,0,6,0]);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -503,57 +529,16 @@ impl Assembler {
     }
 
     fn eval_arithmetic(&self, expression: &str) -> i32 {
-        let expression = expression
-            .trim()
-            .trim_matches(|c| c == '(' || c == ')')
-            .trim();
-        if expression.is_empty() {
-            return 0;
+        let mut expanded = expression.to_string();
+        let (names, values): (Vec<_>, Vec<_>) = self.assignment_aliases.iter().map(|(name, value)| (name.clone(), value.clone())).unzip();
+        for _ in 0..16 {
+            let next = substitute_macro_parameters(&expanded, &names, &values);
+            if next == expanded { break; }
+            expanded = next;
         }
-        if let Some(hex) = expression.strip_prefix('$') {
-            return i32::from_str_radix(hex, 16).unwrap_or(0);
-        }
-        if let Some(hex) = expression
-            .strip_prefix("0x")
-            .or_else(|| expression.strip_prefix("0X"))
-        {
-            return i32::from_str_radix(hex, 16).unwrap_or(0);
-        }
-        if let Some(hex) = expression.strip_suffix('h').or_else(|| expression.strip_suffix('H')) {
-            if !hex.is_empty() && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
-                return i32::from_str_radix(hex, 16).unwrap_or(0);
-            }
-        }
-        if let Some((left, right)) = expression.split_once('+') {
-            return self.eval_arithmetic(left.trim()) + self.eval_arithmetic(right.trim());
-        }
-        if let Some((left, right)) = expression.split_once('-') {
-            return self.eval_arithmetic(left.trim()) - self.eval_arithmetic(right.trim());
-        }
-        if let Some((left, right)) = expression.split_once('*') {
-            return self.eval_arithmetic(left.trim()) * self.eval_arithmetic(right.trim());
-        }
-        if let Some((left, right)) = expression.split_once('/') {
-            let divisor = self.eval_arithmetic(right.trim());
-            return if divisor == 0 {
-                0
-            } else {
-                self.eval_arithmetic(left.trim()) / divisor
-            };
-        }
-        if let Some((left, right)) = expression.split_once('|') {
-            return self.eval_arithmetic(left.trim()) | self.eval_arithmetic(right.trim());
-        }
-        if let Some((left, right)) = expression.split_once('&') {
-            return self.eval_arithmetic(left.trim()) & self.eval_arithmetic(right.trim());
-        }
-        if let Ok(value) = expression.parse::<i32>() {
-            return value;
-        }
-        self.symbol_table
-            .get_ignore_case(expression)
-            .copied()
-            .unwrap_or(0) as i32
+        parser::evaluate_arithmetic(&expanded, |name| {
+            self.symbol_table.get(name).or_else(|| self.symbol_table.get_ignore_case(name)).copied().unwrap_or(0) as i32
+        })
     }
 
     pub fn new() -> Self {
@@ -561,6 +546,7 @@ impl Assembler {
             symbol_table: SymbolTable::default(),
             macro_table: HashMap::new(),
             current_address: 0,
+            assignment_aliases: HashMap::new(),
         }
     }
 
@@ -592,6 +578,18 @@ impl Assembler {
             let mut trimmed = trimmed_owned.as_str();
             let upper_trimmed = trimmed.to_uppercase();
             let line_num = processed_lines; // approximate
+
+            // 2. If we are currently recording a macro definition body
+            if let Some(ref mut macro_def) = current_macro {
+                if trimmed.eq_ignore_ascii_case(".endm") {
+                    self.macro_table
+                        .insert(macro_def.name.to_uppercase(), macro_def.clone());
+                    current_macro = None;
+                } else {
+                    macro_def.body.push(raw_line);
+                }
+                continue;
+            }
 
             let conditional_directive = upper_trimmed.split_whitespace().next().unwrap_or("");
             if conditional_directive == ".IF"
@@ -704,18 +702,6 @@ impl Assembler {
                 continue;
             }
 
-            // 2. If we are currently recording a macro definition body
-            if let Some(ref mut macro_def) = current_macro {
-                if trimmed.eq_ignore_ascii_case(".endm") {
-                    self.macro_table
-                        .insert(macro_def.name.to_uppercase(), macro_def.clone());
-                    current_macro = None;
-                } else {
-                    macro_def.body.push(raw_line);
-                }
-                continue;
-            }
-
             // 3. Skip empty lines and comments
             if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('*') {
                 continue;
@@ -739,15 +725,17 @@ impl Assembler {
                 };
                 match parsed {
                     Ok(Instruction::Equ { name, value }) => {
-                        self.symbol_table.insert(name.clone(), value as u32);
+                        let mut value = value;
                         let words: Vec<&str> = trimmed.split_whitespace().collect();
                         if words.len() >= 3 {
                             let expression = words[2..].join(" ");
+                            value = self.eval_arithmetic(&expression);
                             pending_equates.push((
                                 name.clone(),
                                 expression.split(';').next().unwrap_or("").trim().to_string(),
                             ));
                         }
+                        self.symbol_table.insert(name.clone(), value as u32);
                         ast.push(Instruction::Equ { name, value });
                         continue;
                     }
@@ -1076,11 +1064,12 @@ impl Assembler {
                     if !alias.is_empty() {
                         let value = self.eval_arithmetic(parts[0].trim()) as u32;
                         self.symbol_table.insert(alias.to_string(), value);
+                        self.assignment_aliases.insert(alias.to_string(), parts[0].trim().to_string());
                     }
                 }
                 ast.push(Instruction::Directive {
-                    name: parts.first().unwrap_or(&".ASG").to_string(),
-                    args: parts.iter().skip(1).map(|s| s.trim().to_string()).collect(),
+                    name: ".asg".to_string(),
+                    args: parts.iter().map(|s| s.trim().to_string()).collect(),
                 });
                 continue;
             }
@@ -1120,6 +1109,11 @@ impl Assembler {
                         let alias = alias.trim();
                         if !alias.is_empty() {
                             let value = self.eval_arithmetic(expression.trim()) as u32;
+                            if name.eq_ignore_ascii_case(".asg") {
+                                self.assignment_aliases.insert(alias.to_string(), expression.trim().to_string());
+                            } else {
+                                self.assignment_aliases.remove(alias);
+                            }
                             self.symbol_table.insert(alias.to_string(), value);
                             if name.eq_ignore_ascii_case(".eval") {
                                 volatile_symbols.insert(alias.to_ascii_uppercase());
