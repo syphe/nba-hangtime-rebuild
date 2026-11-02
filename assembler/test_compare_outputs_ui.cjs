@@ -27,7 +27,7 @@ nodes['#different'].checked = false;
 const fixture = vm.runInContext('JSON.parse(JSON.stringify(R))', context);
 fixture.modules = [{module:'ZZZ',section:'.text',actual_bits:128,expected_bits:64,status:'size differs',comparison:null},
                    {module:'AAA',section:'.text',actual_bits:0,expected_bits:64,status:'size differs',comparison:null}];
-fixture.coverage = [{module:'DEMO',omitted:[{mnemonic:'SEXT',count:2},{mnemonic:'NEG',count:1}]},
+fixture.coverage = [{module:'DEMO',omitted:[{mnemonic:'SEXT',count:2,examples:['@base+FIELD, a0','<untrusted>']},{mnemonic:'NEG',count:1}]},
                     {module:'OLD',omitted:null}];
 const coverageNodes = {};
 const coverageDocument = { querySelector: key => coverageNodes[key] ||= {innerHTML:'',value:'',checked:false},
@@ -40,5 +40,7 @@ vm.runInContext("key='delta';direction=-1;rows()", fixtureContext);
 assert.match(coverageNodes['#modules'].innerHTML, /<tr><td>ZZZ<\/td>/);
 assert.match(coverageNodes['#coverage'].innerHTML, /3 omitted instruction occurrences across 1 modules/);
 assert.match(coverageNodes['#coverage'].innerHTML, /unavailable for 1 modules/);
-assert.match(coverageNodes['#coverage'].innerHTML, /SEXT \(2\), NEG \(1\)/);
+assert.match(coverageNodes['#coverage'].innerHTML, /SEXT \(2\).*NEG \(1\)/s);
+assert.match(coverageNodes['#coverage'].innerHTML, /@base\+FIELD, a0/);
+assert.match(coverageNodes['#coverage'].innerHTML, /&lt;untrusted&gt;/);
 console.log('PASS: report renders 153 contributions; search, filtering, sorting, and coverage counts work.');

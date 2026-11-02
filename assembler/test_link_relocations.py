@@ -11,6 +11,29 @@ from link import relative_fixup_bytes
 
 
 class RelativeRelocations(unittest.TestCase):
+    def test_move_address_and_offset_fields_relocate_without_touching_opcodes(self):
+        code = struct.pack('<HIHIHIIHH', 0x07a0,0,0x0780,0,0x07c0,0,0,0xb622,0)
+        obj = dict(format='tms34010-object', sections=[
+            dict(name='.text',data=base64.b64encode(code).decode()),
+            dict(name='.data',data=base64.b64encode(bytes(4)).decode())],
+            symbols=[dict(name='src',section='.data',section_offset=0,kind='symbol'),
+                     dict(name='dst',section='.data',section_offset=2,kind='symbol'),
+                     dict(name='FIELD',section='',address=32,kind='symbol')],
+            fixups=[dict(section='.text',offset=offset,symbol=expression,kind=kind) for offset,expression,kind in
+                    [(2,'src+16','absolute32'),(8,'dst','absolute32'),(14,'src','absolute32'),
+                     (18,'dst','absolute32'),(24,'FIELD+16','absolute16')]])
+        build = Path(__file__).resolve().parent / 'build'
+        build.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=build) as temporary:
+            root = Path(temporary)
+            self.assertTrue(root.resolve().is_relative_to(build.resolve()))
+            (root/'test.OBJ').write_text(json.dumps(obj))
+            subprocess.run([sys.executable,str(Path(__file__).with_name('link.py')),str(root/'test.OBJ'),
+                            '--output',str(root/'ROM.bin')],check=True,capture_output=True)
+            source = 0xff800000 + len(code)*8
+            expected = struct.pack('<HIHIHIIHH',0x07a0,source+16,0x0780,source+16,0x07c0,source,source+16,0xb622,48)
+            self.assertEqual((root/'ROM.bin').read_bytes()[:len(code)],expected)
+
     def test_short_branches_patch_low_byte_and_preserve_condition(self):
         for displacement in (-127, -1, 1, 127):
             self.assertEqual(relative_fixup_bytes('tms34010-relative', 0x1000,

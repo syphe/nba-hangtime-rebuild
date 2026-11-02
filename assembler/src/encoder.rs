@@ -206,293 +206,84 @@ pub fn encode_instruction(
                 .copied().unwrap_or(current_addr);
             let relative = (target_addr as i64 - (current_addr + 4) as i64) / 2;
             if relative < i16::MIN as i64 || relative > i16::MAX as i64 {
-                bytes.extend_from_slice(&0x0D40u16.to_le_bytes());
+                bytes.extend_from_slice(&0x0D5Fu16.to_le_bytes());
                 bytes.extend_from_slice(&(target_addr as u16).to_le_bytes());
                 bytes.extend_from_slice(&((target_addr >> 16) as u16).to_le_bytes());
             } else {
-                bytes.extend_from_slice(&0x0D20u16.to_le_bytes());
+                bytes.extend_from_slice(&0x0D3Fu16.to_le_bytes());
                 bytes.extend_from_slice(&(relative as i16).to_le_bytes());
             }
         }
         ParsedInstruction::Move { src, dst, field } => {
-            let field_val = if let Some(f) = field {
-                Some(resolve_immediate(f, symbols)?)
-            } else {
-                None
+            let field = match field {
+                None => 0,
+                Some(field) => resolve_immediate(field, symbols)?,
             };
-
-            match (src, dst) {
-                (Operand::Immediate(src_val), Operand::Symbol(dst_label)) => {
-                    let addr = symbols
-                        .get(dst_label)
-                        .or_else(|| symbols.get_ignore_case(dst_label))
-                        .copied()
-                        .unwrap_or(0);
-                    bytes.extend_from_slice(&0x4400u16.to_le_bytes());
-                    bytes.extend_from_slice(&(*src_val as u16).to_le_bytes());
-                    bytes.extend_from_slice(&(addr as u16).to_le_bytes());
+            if !(0..=1).contains(&field) { return Err(EncodeError::InvalidOperand); }
+            let f = (field as u16) << 9;
+            let value = |expression: &str| crate::parser::evaluate_arithmetic(expression, |name| {
+                symbols.get(name).or_else(|| symbols.get_ignore_case(name)).copied().unwrap_or(0) as i32
+            });
+            let mut extensions = Vec::new();
+            let opcode = match (src, dst) {
+                (Operand::Immediate(_) | Operand::Symbol(_), Operand::Reg(d)) => {
+                    extensions.extend_from_slice(&(resolve_immediate(src,symbols)? as u32).to_le_bytes());
+                    0x09E0 | encode_register(d) as u16
                 }
-                (Operand::Immediate(src_val), Operand::Immediate(dst_val)) => {
-                    bytes.extend_from_slice(&0x4700u16.to_le_bytes());
-                    bytes.extend_from_slice(&(*src_val as u16).to_le_bytes());
-                    bytes.extend_from_slice(&(*dst_val as u16).to_le_bytes());
+                (Operand::Reg(s), Operand::Reg(d)) => {
+                    let s = encode_register(s) as u16; let d = encode_register(d) as u16;
+                    0x4C00 | ((s & 15) << 5) | (d & 15) | (s & 16) | if (s ^ d) & 16 != 0 { 0x200 } else { 0 }
                 }
-                (src_op, Operand::Reg(d_reg))
-                    if matches!(src_op, Operand::Immediate(_) | Operand::Symbol(_)) =>
-                {
-                    let val = resolve_immediate(src_op, symbols)?;
-                    let mut opcode: u16 = 0x09E0;
-                    let d_val = encode_register(d_reg) as u16;
-                    opcode |= d_val & 0x1F;
-
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                    bytes.extend_from_slice(&(val as u32 as u16).to_le_bytes());
-                    bytes.extend_from_slice(&((val as u32 >> 16) as u16).to_le_bytes());
+                (Operand::Reg(s), Operand::DirectMemory(address)) => {
+                    extensions.extend_from_slice(&(value(address) as u32).to_le_bytes());
+                    0x0580 | f | encode_register(s) as u16
                 }
-                (Operand::Reg(s_reg), Operand::Reg(d_reg)) => {
-                    let mut opcode: u16 = 0x4C00;
-                    let s_val = encode_register(s_reg) as u16;
-                    let d_val = encode_register(d_reg) as u16;
-                    opcode |= (s_val & 0x0F) << 5;
-                    opcode |= d_val & 0x0F;
-                    opcode |= s_val & 0x10;
-                    if (s_val ^ d_val) & 0x10 != 0 { opcode |= 0x0200; }
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
+                (Operand::DirectMemory(address), Operand::Reg(d)) => {
+                    extensions.extend_from_slice(&(value(address) as u32).to_le_bytes());
+                    0x05A0 | f | encode_register(d) as u16
                 }
-                (Operand::Indirect(s_reg), Operand::Reg(d_reg)) => {
-                    let mut opcode: u16 = 0x2100;
-                    let s_val = encode_register(s_reg) as u16;
-                    let d_val = encode_register(d_reg) as u16;
-                    opcode |= (s_val & 0x0F) << 4;
-                    opcode |= d_val & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
+                (Operand::DirectMemory(source), Operand::DirectMemory(destination)) => {
+                    extensions.extend_from_slice(&(value(source) as u32).to_le_bytes());
+                    extensions.extend_from_slice(&(value(destination) as u32).to_le_bytes());
+                    0x05C0 | f
                 }
-                (Operand::IndirectOffset(s_reg, offset), Operand::Reg(d_reg)) => {
-                    let mut opcode: u16 = 0x2400;
-                    let s_val = encode_register(s_reg) as u16;
-                    let d_val = encode_register(d_reg) as u16;
-                    opcode |= (s_val & 0x0F) << 4;
-                    opcode |= d_val & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                    bytes.extend_from_slice(&(*offset as u16).to_le_bytes());
+                (Operand::DirectMemory(address), Operand::IndirectPostInc(d)) => {
+                    extensions.extend_from_slice(&(value(address) as u32).to_le_bytes());
+                    0xD400 | f | encode_register(d) as u16
                 }
-                (Operand::Reg(s_reg), Operand::IndirectOffset(d_reg, offset)) => {
-                    let mut opcode: u16 = 0x2800;
-                    let s_val = encode_register(s_reg) as u16;
-                    let d_val = encode_register(d_reg) as u16;
-                    opcode |= (s_val & 0x0F) << 4;
-                    opcode |= d_val & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                    bytes.extend_from_slice(&(*offset as u16).to_le_bytes());
+                _ => {
+                    fn register(operand: &Operand) -> Option<&Register> {
+                        match operand {
+                            Operand::Reg(r) | Operand::Indirect(r) | Operand::IndirectPostInc(r)
+                            | Operand::IndirectPreDec(r) | Operand::IndirectOffset(r,_) => Some(r), _ => None,
+                        }
+                    }
+                    let base = match (src, dst) {
+                        (Operand::Reg(_), Operand::Indirect(_)) => 0x8000,
+                        (Operand::Indirect(_), Operand::Reg(_)) => 0x8400,
+                        (Operand::Indirect(_), Operand::Indirect(_)) => 0x8800,
+                        (Operand::Reg(_), Operand::IndirectPostInc(_)) => 0x9000,
+                        (Operand::IndirectPostInc(_), Operand::Reg(_)) => 0x9400,
+                        (Operand::IndirectPostInc(_), Operand::IndirectPostInc(_)) => 0x9800,
+                        (Operand::Reg(_), Operand::IndirectPreDec(_)) => 0xA000,
+                        (Operand::IndirectPreDec(_), Operand::Reg(_)) => 0xA400,
+                        (Operand::IndirectPreDec(_), Operand::IndirectPreDec(_)) => 0xA800,
+                        (Operand::Reg(_), Operand::IndirectOffset(_,_)) => 0xB000,
+                        (Operand::IndirectOffset(_,_), Operand::Reg(_)) => 0xB400,
+                        (Operand::IndirectOffset(_,_), Operand::IndirectOffset(_,_)) => 0xB800,
+                        (Operand::IndirectOffset(_,_), Operand::IndirectPostInc(_)) => 0xD000,
+                        _ => return Err(EncodeError::UnsupportedInstruction),
+                    };
+                    for operand in [src,dst] {
+                        if let Operand::IndirectOffset(_,expression) = operand {
+                            extensions.extend_from_slice(&(value(expression) as u16).to_le_bytes());
+                        }
+                    }
+                    base | f | same_file_registers(register(src).unwrap(),register(dst).unwrap())?
                 }
-                (Operand::IndirectOffset(s_reg, offset), Operand::IndirectPostInc(d_reg)) => {
-                    let mut opcode: u16 = 0x3000;
-                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
-                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                    bytes.extend_from_slice(&(*offset as u16).to_le_bytes());
-                }
-                (Operand::IndirectPostInc(s_reg), Operand::Reg(d_reg)) => {
-                    let mut opcode: u16 = 0x2200;
-                    let s_val = encode_register(s_reg) as u16;
-                    let d_val = encode_register(d_reg) as u16;
-                    opcode |= (s_val & 0x0F) << 4;
-                    opcode |= d_val & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                }
-                (Operand::IndirectPreDec(s_reg), Operand::Reg(d_reg)) => {
-                    let mut opcode: u16 = 0x2300;
-                    let s_val = encode_register(s_reg) as u16;
-                    let d_val = encode_register(d_reg) as u16;
-                    opcode |= (s_val & 0x0F) << 4;
-                    opcode |= d_val & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                }
-                // Register to Indirect Pre-Decrement destination (e.g., MOVE A0, -*SP)
-                (Operand::Reg(s_reg), Operand::IndirectPostInc(d_reg)) => {
-                    let mut opcode: u16 = 0x2A00;
-                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
-                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                }
-                (
-                    Operand::IndirectOffset(s_reg, s_offset),
-                    Operand::IndirectOffset(d_reg, d_offset),
-                ) => {
-                    let mut opcode: u16 = 0x2F00;
-                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
-                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                    bytes.extend_from_slice(&(*s_offset as u16).to_le_bytes());
-                    bytes.extend_from_slice(&(*d_offset as u16).to_le_bytes());
-                }
-                (Operand::Indirect(s_reg), Operand::Indirect(d_reg)) => {
-                    let mut opcode: u16 = 0x2E00;
-                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
-                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                }
-                (Operand::IndirectPreDec(s_reg), Operand::IndirectPreDec(d_reg)) => {
-                    let mut opcode: u16 = 0x2D00;
-                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
-                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                }
-                (Operand::IndirectPostInc(s_reg), Operand::IndirectPostInc(d_reg)) => {
-                    let mut opcode: u16 = 0x2C00;
-                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
-                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                }
-                (Operand::Reg(s_reg), Operand::Indirect(d_reg)) => {
-                    let mut opcode: u16 = 0x2900;
-                    opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
-                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                }
-                (Operand::Reg(s_reg), Operand::IndirectPreDec(d_reg)) => {
-                    let mut opcode: u16 = 0x2B00; // Base opcode mapping for reg-to-predec destination
-                    let s_val = encode_register(s_reg) as u16;
-                    let d_val = encode_register(d_reg) as u16;
-                    opcode |= (s_val & 0x0F) << 4;
-                    opcode |= d_val & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                }
-                (Operand::Symbol(src_label), Operand::DirectMemory(dst_label)) => {
-                    let src = symbols
-                        .get(src_label)
-                        .or_else(|| symbols.get_ignore_case(src_label))
-                        .copied()
-                        .unwrap_or(0);
-                    let dst = symbols
-                        .get(dst_label)
-                        .or_else(|| symbols.get_ignore_case(dst_label))
-                        .copied()
-                        .unwrap_or(0);
-                    bytes.extend_from_slice(&0x4700u16.to_le_bytes());
-                    bytes.extend_from_slice(&(src as u16).to_le_bytes());
-                    bytes.extend_from_slice(&(dst as u16).to_le_bytes());
-                }
-                (Operand::DirectMemory(src_label), Operand::Symbol(dst_label)) => {
-                    let src = symbols
-                        .get(src_label)
-                        .or_else(|| symbols.get_ignore_case(src_label))
-                        .copied()
-                        .unwrap_or(0);
-                    let dst_name = dst_label.trim_start_matches('*').trim_end_matches('+');
-                    let dst = symbols
-                        .get(dst_name)
-                        .or_else(|| symbols.get_ignore_case(dst_name))
-                        .copied()
-                        .unwrap_or(0);
-                    bytes.extend_from_slice(&0x4700u16.to_le_bytes());
-                    bytes.extend_from_slice(&(src as u16).to_le_bytes());
-                    bytes.extend_from_slice(&(dst as u16).to_le_bytes());
-                }
-                (Operand::DirectMemory(src_label), Operand::IndirectPostInc(d_reg)) => {
-                    let val = symbols
-                        .get(src_label)
-                        .or_else(|| symbols.get_ignore_case(src_label))
-                        .copied()
-                        .unwrap_or(0);
-                    let mut opcode: u16 = 0x4A00;
-                    opcode |= (encode_register(d_reg) as u16) & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                    bytes.extend_from_slice(&(val as u16).to_le_bytes());
-                }
-                (Operand::Reg(s_reg), Operand::Immediate(dst_val)) => {
-                    let mut opcode: u16 = 0x4400;
-                    opcode |= (encode_register(s_reg) as u16) & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                    bytes.extend_from_slice(&(*dst_val as u16).to_le_bytes());
-                }
-                (Operand::Reg(s_reg), Operand::Symbol(label)) => {
-                    let val = symbols
-                        .get(label)
-                        .or_else(|| symbols.get_ignore_case(label))
-                        .copied()
-                        .unwrap_or(0);
-                    let mut opcode: u16 = 0x4600;
-                    opcode |= (encode_register(s_reg) as u16) & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                    bytes.extend_from_slice(&(val as u16).to_le_bytes());
-                }
-                (Operand::Reg(s_reg), Operand::DirectMemory(label)) => {
-                    let val = symbols
-                        .get(label)
-                        .or_else(|| symbols.get_ignore_case(label))
-                        .copied()
-                        .unwrap_or(0);
-                    let mut opcode: u16 = 0x4600;
-                    opcode |= (encode_register(s_reg) as u16) & 0x0F;
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                    bytes.extend_from_slice(&(val as u16).to_le_bytes());
-                }
-                (Operand::Symbol(src_label), Operand::Symbol(dst_label)) => {
-                    bytes.extend_from_slice(&0x4700u16.to_le_bytes());
-                    bytes.extend_from_slice(
-                        &(symbols
-                            .get(src_label)
-                            .or_else(|| symbols.get_ignore_case(src_label))
-                            .copied()
-                            .unwrap_or(
-                                resolve_immediate(&Operand::Symbol(src_label.clone()), symbols)
-                                    .unwrap_or(0) as u32,
-                            ) as u16)
-                            .to_le_bytes(),
-                    );
-                    bytes.extend_from_slice(
-                        &(symbols
-                            .get(dst_label)
-                            .or_else(|| symbols.get_ignore_case(dst_label))
-                            .copied()
-                            .unwrap_or(
-                                resolve_immediate(&Operand::Symbol(dst_label.clone()), symbols)
-                                    .unwrap_or(0) as u32,
-                            ) as u16)
-                            .to_le_bytes(),
-                    );
-                }
-                (Operand::DirectMemory(src_label), Operand::DirectMemory(dst_label)) => {
-                    bytes.extend_from_slice(&0x4700u16.to_le_bytes());
-                    bytes.extend_from_slice(
-                        &(symbols
-                            .get(src_label)
-                            .or_else(|| symbols.get_ignore_case(src_label))
-                            .copied()
-                            .unwrap_or(0) as u16)
-                            .to_le_bytes(),
-                    );
-                    bytes.extend_from_slice(
-                        &(symbols
-                            .get(dst_label)
-                            .or_else(|| symbols.get_ignore_case(dst_label))
-                            .copied()
-                            .unwrap_or(0) as u16)
-                            .to_le_bytes(),
-                    );
-                }
-                (Operand::DirectMemory(label), Operand::Reg(d_reg)) => {
-                    let val = symbols
-                        .get(label)
-                        .or_else(|| symbols.get_ignore_case(label))
-                        .copied()
-                        .unwrap_or(0);
-
-                    let mut opcode: u16 = 0x4500;
-                    let d_val = encode_register(d_reg) as u16;
-                    opcode |= d_val & 0x0F;
-
-                    bytes.extend_from_slice(&opcode.to_le_bytes());
-                    bytes.extend_from_slice(&(val as u16).to_le_bytes());
-                }
-                _ => return Err(EncodeError::UnsupportedInstruction),
-            }
-
-            // Append field size/specifier extension word if present (e.g. ,1)
-            if let Some(fv) = field_val {
-                bytes.extend_from_slice(&(fv as u16).to_le_bytes());
-            }
+            };
+            bytes.extend_from_slice(&opcode.to_le_bytes());
+            bytes.extend_from_slice(&extensions);
         }
         ParsedInstruction::Inc { dst } | ParsedInstruction::Dec { dst } => {
             let Operand::Reg(reg) = dst else { return Err(EncodeError::InvalidOperand); };
@@ -560,6 +351,21 @@ pub fn encode_instruction(
             bytes.extend_from_slice(&(base | same_file_registers(s, d)?).to_le_bytes());
         }
         ParsedInstruction::Movb { src, dst } => {
+            let absolute = match (src,dst) {
+                (Operand::Reg(reg),Operand::DirectMemory(address)) => Some((0x05E0 | encode_register(reg) as u16,vec![address])),
+                (Operand::DirectMemory(address),Operand::Reg(reg)) => Some((0x07E0 | encode_register(reg) as u16,vec![address])),
+                (Operand::DirectMemory(source),Operand::DirectMemory(destination)) => Some((0x0340,vec![source,destination])),
+                _ => None,
+            };
+            if let Some((opcode,addresses)) = absolute {
+                bytes.extend_from_slice(&opcode.to_le_bytes());
+                for address in addresses {
+                    let value = crate::parser::evaluate_arithmetic(address, |name| symbols.get(name).or_else(|| symbols.get_ignore_case(name)).copied().unwrap_or(0) as i32);
+                    bytes.extend_from_slice(&(value as u32).to_le_bytes());
+                }
+                return Ok(bytes);
+            }
+
             match (src, dst) {
                 (Operand::Indirect(s_reg), Operand::Indirect(d_reg)) => {
                     let mut opcode: u16 = 0x2700;
@@ -575,8 +381,8 @@ pub fn encode_instruction(
                     opcode |= ((encode_register(s_reg) as u16) & 0x0F) << 4;
                     opcode |= (encode_register(d_reg) as u16) & 0x0F;
                     bytes.extend_from_slice(&opcode.to_le_bytes());
-                    bytes.extend_from_slice(&(*s_offset as u16).to_le_bytes());
-                    bytes.extend_from_slice(&(*d_offset as u16).to_le_bytes());
+                    bytes.extend_from_slice(&(crate::parser::evaluate_arithmetic(s_offset, |name| symbols.get(name).or_else(|| symbols.get_ignore_case(name)).copied().unwrap_or(0) as i32) as u16).to_le_bytes());
+                    bytes.extend_from_slice(&(crate::parser::evaluate_arithmetic(d_offset, |name| symbols.get(name).or_else(|| symbols.get_ignore_case(name)).copied().unwrap_or(0) as i32) as u16).to_le_bytes());
                 }
                 (Operand::Reg(s_reg), Operand::DirectMemory(label)) => {
                     let addr = symbols
@@ -600,7 +406,7 @@ pub fn encode_instruction(
                 }
                 (Operand::IndirectOffset(s_reg, offset), Operand::Reg(d_reg)) => {
                     bytes.extend_from_slice(&0x2500u16.to_le_bytes());
-                    bytes.extend_from_slice(&(*offset as u16).to_le_bytes());
+                    bytes.extend_from_slice(&(crate::parser::evaluate_arithmetic(offset, |name| symbols.get(name).or_else(|| symbols.get_ignore_case(name)).copied().unwrap_or(0) as i32) as u16).to_le_bytes());
                 }
                 (Operand::Reg(s_reg), Operand::Indirect(d_reg)) => {
                     let mut opcode: u16 = 0x2600;
@@ -610,7 +416,7 @@ pub fn encode_instruction(
                 }
                 (Operand::Reg(s_reg), Operand::IndirectOffset(d_reg, offset)) => {
                     bytes.extend_from_slice(&0x2600u16.to_le_bytes());
-                    bytes.extend_from_slice(&(*offset as u16).to_le_bytes());
+                    bytes.extend_from_slice(&(crate::parser::evaluate_arithmetic(offset, |name| symbols.get(name).or_else(|| symbols.get_ignore_case(name)).copied().unwrap_or(0) as i32) as u16).to_le_bytes());
                 }
                 (Operand::Reg(s_reg), Operand::Reg(d_reg)) => {
                     let mut opcode: u16 = 0x2400; // Reg-to-reg byte move
@@ -805,7 +611,7 @@ pub fn encode_instruction(
 
         ParsedInstruction::Calla { target } => {
             let val = resolve_immediate(target, symbols)?;
-            let opcode: u16 = 0x0D40; // Base opcode for absolute call on TMS34010
+            let opcode: u16 = 0x0D5F; // Base opcode for absolute call on TMS34010
             bytes.extend_from_slice(&opcode.to_le_bytes());
             bytes.extend_from_slice(&(val as u32 as u16).to_le_bytes());
             bytes.extend_from_slice(&((val as u32 >> 16) as u16).to_le_bytes());

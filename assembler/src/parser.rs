@@ -30,7 +30,7 @@ pub enum Operand {
     IndirectPostInc(Register),
     IndirectPreDec(Register),
     DirectMemory(String),
-    IndirectOffset(Register, i32),
+    IndirectOffset(Register, String),
     IndirectField(Register, String),
 }
 
@@ -217,6 +217,7 @@ pub struct MacroTemplate {
 
 pub fn parse_register(input: &str) -> IResult<&str, Register> {
     let (input, reg_str) = take_while1(|c: char| c.is_alphanumeric())(input)?;
+    if input.starts_with('_') || input.starts_with('.') { return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))); }
     let upper = reg_str.to_uppercase();
 
     let reg = match upper.as_str() {
@@ -360,14 +361,8 @@ pub fn parse_operand(input: &str) -> IResult<&str, Operand> {
                 }
             },
         ),
-        // 3. Direct Memory / Absolute: @label
-        map(
-            preceded(
-                char('@'),
-                take_while1(|c: char| c.is_alphanumeric() || c == '_'),
-            ),
-            |s: &str| Operand::DirectMemory(s.to_string()),
-        ),
+        map(preceded(char('@'), take_while1(|c: char| c.is_ascii_alphanumeric() || "_.$#()+-*/&|~^ \t".contains(c))),
+            |text: &str| Operand::DirectMemory(text.trim().to_string())),
         // 4. Indirect Pre-Decrement: -*A0 (must be before simple indirect)
         map(
             tuple((char('-'), char('*'), parse_register)),
@@ -406,26 +401,23 @@ pub fn parse_nop(input: &str) -> IResult<&str, ParsedInstruction> {
 pub fn parse_move(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = tag_no_case("MOVE")(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, src) = alt((parse_operand, parse_legacy_immediate))(input)?;
-    let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
-    let (input, dst) = parse_operand(input)?;
-
-    // Optional third argument for field size/width (e.g., ",1")
-    let (input, field) = opt(tuple((
-        delimited(multispace0, char(','), multispace0),
-        parse_legacy_immediate,
-    )))(input)?;
-
-    let field_op = field.map(|(_, f)| f);
-
-    Ok((
-        input,
-        ParsedInstruction::Move {
-            src,
-            dst,
-            field: field_op,
-        },
-    ))
+    let args = split_asm_operands(input);
+    let invalid = || nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag));
+    if !(2..=3).contains(&args.len()) { return Err(invalid()); }
+    let (rest, src) = alt((parse_operand, parse_legacy_immediate))(args[0].as_str()).map_err(|_| invalid())?;
+    if !rest.trim().is_empty() { return Err(invalid()); }
+    let (rest, dst) = parse_operand(&args[1]).map_err(|_| invalid())?;
+    if !rest.trim().is_empty() { return Err(invalid()); }
+    let field = if let Some(field) = args.get(2) {
+        Some(if field.eq_ignore_ascii_case("L") { Operand::Immediate(1) }
+             else if field.eq_ignore_ascii_case("W") { Operand::Immediate(0) }
+             else {
+                 let (rest, value) = parse_legacy_immediate(field).map_err(|_| invalid())?;
+                 if !rest.trim().is_empty() { return Err(invalid()); }
+                 value
+             })
+    } else { None };
+    Ok(("", ParsedInstruction::Move { src, dst, field }))
 }
 
 /// Helper to clean comments and whitespace from a line before parsing
@@ -1094,14 +1086,17 @@ pub fn parse_rets(input: &str) -> IResult<&str, ParsedInstruction> {
 
 // Parses *reg(offset), e.g. *a0(16)
 fn parse_indirect_offset(input: &str) -> IResult<&str, Operand> {
-    let (input, _) = tag("*")(input)?;
-    let (input, reg) = parse_register(input)?; // Use your project's register parser
-    let (input, _) = tag("(")(input)?;
-    let (input, offset_str) = nom::bytes::complete::take_till(|c| c == ')')(input)?;
-    let (input, _) = tag(")")(input)?;
-
-    let offset = offset_str.trim().parse::<i32>().unwrap_or(0);
-    Ok((input, Operand::IndirectOffset(reg, offset)))
+    let (input, _) = char('*')(input)?;
+    let (input, reg) = parse_register(input)?;
+    let (input, _) = char('(')(input)?;
+    let mut depth = 1;
+    for (index, ch) in input.char_indices() {
+        match ch { '(' => depth += 1, ')' => depth -= 1, _ => {} }
+        if depth == 0 {
+            return Ok((&input[index+1..], Operand::IndirectOffset(reg, input[..index].trim().to_string())));
+        }
+    }
+    Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
 }
 
 /// Parse ADDI instruction (supports legacy syntax like "ADDI AddressTable, A0" or standard "#val, A0")

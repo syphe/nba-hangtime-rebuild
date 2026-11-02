@@ -195,18 +195,22 @@ struct ObjectFile {
 struct OmittedInstruction {
     mnemonic: String,
     count: usize,
+    examples: Vec<String>,
 }
 
 fn omitted_instructions(ast: &[Instruction]) -> Vec<OmittedInstruction> {
-    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    let mut counts = std::collections::BTreeMap::<String, (usize, Vec<String>)>::new();
     for instruction in ast {
-        if let Instruction::Directive { name, .. } = instruction {
+        if let Instruction::Directive { name, args } = instruction {
             if !name.starts_with('.') && !matches!(name.to_ascii_uppercase().as_str(), "MMTM" | "MMFM") {
-                *counts.entry(name.to_ascii_uppercase()).or_default() += 1;
+                let (count, examples) = counts.entry(name.to_ascii_uppercase()).or_default();
+                *count += 1;
+                let example = args.join(", ");
+                if examples.len() < 3 && !examples.contains(&example) { examples.push(example); }
             }
         }
     }
-    counts.into_iter().map(|(mnemonic, count)| OmittedInstruction { mnemonic, count }).collect()
+    counts.into_iter().map(|(mnemonic, (count, examples))| OmittedInstruction { mnemonic, count, examples }).collect()
 }
 
 impl ObjectFile {
@@ -405,6 +409,28 @@ impl ObjectFile {
                     }
                 }
             }
+            if let Instruction::Move { src, dst, .. } | Instruction::Movb { src, dst } = instruction {
+                let mut extension_offset = 2u32;
+                for operand in [src,dst] {
+                    let expression = match operand {
+                        Operand::DirectMemory(expression) => Some((expression,4u32)),
+                        Operand::IndirectOffset(_,expression) => Some((expression,2u32)),
+                        _ => None,
+                    };
+                    if let Some((expression,width)) = expression {
+                        if is_symbolic_expression(expression) {
+                            fixups.push(ObjectFixup {
+                                offset: section_pc + extension_offset,
+                                object_offset: offset + extension_offset,
+                                section: current_section.clone(),
+                                symbol: expression.clone(),
+                                kind: if width == 4 { "absolute32" } else { "absolute16" }.to_string(),
+                            });
+                        }
+                        extension_offset += width;
+                    }
+                }
+            }
             let encoded_len = encoded.len() as u32;
             if !encoded.is_empty() {
                 let section = section_data
@@ -475,7 +501,7 @@ fn layout_instruction_size(instruction: &Instruction, address: u32, symbols: &Sy
 
 fn external_absolute_transfer<'a>(instruction: &'a Instruction, ast: &[Instruction]) -> Option<(u16, &'a str)> {
     let (opcode, target) = match instruction {
-        Instruction::Call { label } | Instruction::Callr { label } => (0x0D40, label.as_str()),
+        Instruction::Call { label } | Instruction::Callr { label } => (0x0D5F, label.as_str()),
         Instruction::Jr { label } => (0xC080, label.as_str()),
         Instruction::Jmp { target: Operand::Symbol(label) } => (0xC080, label.as_str()),
         Instruction::Jeq { label } => (0xCA80, label.as_str()),
@@ -507,6 +533,47 @@ mod loop_expression_tests {
     use super::*;
 
     #[test]
+    fn memory_moves_match_reference_words_and_preserve_expressions() {
+        for (source, words) in [
+            ("move a2,*a3", vec![0x8043u16]), ("move *b2,b3,L", vec![0x8653]),
+            ("move *a2,*a3,1", vec![0x8a43]), ("move a2,*a3+,1", vec![0x9243]),
+            ("move *b2+,b3", vec![0x9453]), ("move *a2+,*a3+", vec![0x9843]),
+            ("move a2,-*a3,L", vec![0xa243]), ("move -*a2,a3", vec![0xa443]),
+            ("move -*a2,-*a3,1", vec![0xaa43]),
+            ("move a2,*a3(16)", vec![0xb043,16]), ("move *a2(-16),a3,L", vec![0xb643,0xfff0]),
+            ("move *a2(16),*a3(32),1", vec![0xba43,16,32]),
+            ("move *a2(16),*a3+,1", vec![0xd243,16]),
+            ("move a2,@12345678h", vec![0x0582,0x5678,0x1234]),
+            ("move @12345678h,b3,L", vec![0x07b3,0x5678,0x1234]),
+            ("move @12345678h,@22334455h,1", vec![0x07c0,0x5678,0x1234,0x4455,0x2233]),
+            ("move @12345678h,*b3+,L", vec![0xd613,0x5678,0x1234]),
+            ("movb @12345678h,b3", vec![0x07f3,0x5678,0x1234]),
+            ("movb b3,@12345678h", vec![0x05f3,0x5678,0x1234]),
+            ("movb @12345678h,@22334455h", vec![0x0340,0x5678,0x1234,0x4455,0x2233]),
+        ] {
+            let mut assembler = Assembler::new();
+            let ast = assembler.pass_one(&[source]).unwrap();
+            let expected = words.into_iter().flat_map(u16::to_le_bytes).collect::<Vec<_>>();
+            assert_eq!(assembler.pass_two(&ast).unwrap(),expected,"{source}");
+            assert!(omitted_instructions(&ast).is_empty());
+        }
+        let mut assembler = Assembler::new();
+        let source = ".ref player\nmove @player+FIELD,a0,L\nmove a0,*a1((FIELD+16)/2),1\nmove @player,@player+32,1\nFIELD .equ 32";
+        let ast = assembler.pass_one(&source.lines().collect::<Vec<_>>()).unwrap();
+        let binary = assembler.pass_two(&ast).unwrap();
+        assert_eq!(binary[8..10],[24,0]);
+        let object = ObjectFile::from_assembler(Path::new("test.asm"),&assembler,&ast,&binary);
+        assert_eq!(object.fixups.iter().map(|f| (f.kind.as_str(),f.offset,f.symbol.as_str())).collect::<Vec<_>>(),
+                   vec![("absolute32",2,"player+FIELD"),("absolute16",8,"(FIELD+16)/2"),("absolute32",12,"player"),("absolute32",16,"player+32")]);
+        assert!(parser::parse_move("move a0,a1 unexpected").is_err());
+        // CALLR's low bits are required by the execution table, despite being
+        // ignored by the disassembler's broad opcode mask. Check a real object.
+        let legacy = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../BACKUP/XCODE101L/PAL.OBJ")).unwrap();
+        let text_start = u32::from_le_bytes(legacy[40..44].try_into().unwrap()) as usize;
+        assert_eq!(u16::from_le_bytes(legacy[text_start+36..text_start+38].try_into().unwrap()),0x0d3f);
+    }
+
+    #[test]
     fn hash_targets_emit_branches_calls_and_keep_local_symbol_names() {
         let source = "outside\nnop\njrle #local\ncallr #local\n#local rets\njrne #local";
         let mut assembler = Assembler::new();
@@ -515,7 +582,7 @@ mod loop_expression_tests {
         assert_eq!(assembler.symbol_table.get("#local"), Some(&8));
         assert_eq!(assembler.symbol_table.get("local"), Some(&8));
         let binary = assembler.pass_two(&ast).unwrap();
-        assert_eq!(binary, vec![0,3,2,0xc6,0x20,0x0d,0,0,0x60,9,0xfe,0xcb]);
+        assert_eq!(binary, vec![0,3,2,0xc6,0x3f,0x0d,0,0,0x60,9,0xfe,0xcb]);
         let object = ObjectFile::from_assembler(Path::new("test.asm"), &assembler, &ast, &binary);
         assert_eq!(object.fixups.iter().map(|fixup| (fixup.symbol.as_str(),fixup.kind.as_str(),fixup.offset)).collect::<Vec<_>>(),
                    vec![("#local","tms34010-relative",2),("#local","tms34010-relative16",6),("#local","tms34010-relative",10)]);
@@ -602,7 +669,7 @@ mod loop_expression_tests {
     fn omitted_instruction_diagnostic_counts_mnemonics_but_not_metadata() {
         let mut assembler = Assembler::new();
         let ast = assembler.pass_one(&["SEXT a0,1", "sext a1,1", ".title sample", "nop", "mmtm sp,a0"]).unwrap();
-        assert_eq!(omitted_instructions(&ast), vec![OmittedInstruction { mnemonic: "SEXT".into(), count: 2 }]);
+        assert_eq!(omitted_instructions(&ast), vec![OmittedInstruction { mnemonic: "SEXT".into(), count: 2, examples: vec!["a0, 1".into(),"a1, 1".into()] }]);
     }
 
     #[test]
@@ -620,8 +687,8 @@ mod loop_expression_tests {
             ("jr target", 0, 2, vec![0xc000, 0xffff]),
             ("jr target", 0, 258, vec![0xc000, 0x007f]),
             ("jr target", 0, 0x20000, vec![0xc080, 0, 2]),
-            ("callr target", 0, 4, vec![0x0d20, 0]),
-            ("callr target", 0, 0x20000, vec![0x0d40, 0, 2]),
+            ("callr target", 0, 4, vec![0x0d3f, 0]),
+            ("callr target", 0, 0x20000, vec![0x0d5f, 0, 2]),
             ("dsj b3,target", 0, 0, vec![0x0d93, 0xfffe]),
             ("dsjs b3,target", 0, 0, vec![0x3c33]),
         ] {
@@ -1495,8 +1562,7 @@ impl Assembler {
                 parser_trimmed = format!("{} {}", mnemonic, if explicit_local { operands.to_string() } else { substitute_macro_parameters(operands, &names, &registers) });
             }
             let upper_pt = parser_trimmed.to_uppercase();
-            if (upper_pt.starts_with("MOVE")
-                || upper_pt.starts_with("MOVI")
+            if (upper_pt.starts_with("MOVI")
                 || upper_pt.starts_with("ADD")
                 || upper_pt.starts_with("SUB"))
                 && (parser_trimmed.ends_with(",L")
@@ -1660,7 +1726,7 @@ impl Assembler {
             }).collect();
             for (instruction, transfer) in ast.iter_mut().zip(transfers) {
                 if let Some((opcode, target)) = transfer {
-                    *instruction = if opcode == 0x0D40 {
+                    *instruction = if opcode == 0x0D5F {
                         Instruction::Calla { target: Operand::Symbol(target) }
                     } else {
                         Instruction::Jacc { condition: ((opcode >> 8) & 15) as u8, target }
