@@ -286,6 +286,10 @@ def main():
                 continue
             try:
                 target = resolve_expression(fixup["symbol"], object_symbols)
+            except ZeroDivisionError as error:
+                raise ValueError(
+                    f"{path}: division by zero in relocation expression {fixup['symbol']!r}"
+                ) from error
             except ValueError:
                 if fixup["symbol"].lower() not in implicit_local_labels:
                     unresolved_fixups.append((path, fixup["symbol"]))

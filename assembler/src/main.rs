@@ -156,9 +156,14 @@ impl ObjectFile {
                 directive == "sect" || matches!(directive.as_str(), "text" | "data" | "bss")
             }) {
                 let section_pc = section_offsets.get(&label_section).copied().unwrap_or(0);
-                let len = encoder::encode_instruction(instruction, section_pc, &assembler.symbol_table)
-                    .map(|bytes| bytes.len() as u32)
-                    .unwrap_or(2);
+                let external_transfer = external_absolute_transfer(instruction, ast).is_some();
+                let len = if external_transfer {
+                    6
+                } else {
+                    encoder::encode_instruction(instruction, section_pc, &assembler.symbol_table)
+                        .map(|bytes| bytes.len() as u32)
+                        .unwrap_or(2)
+                };
                 *section_offsets.entry(label_section.clone()).or_default() += len;
             }
         }
@@ -199,8 +204,15 @@ impl ObjectFile {
             }
 
             let section_pc = section_offsets.get(&current_section).copied().unwrap_or(0);
-            let encoded = encoder::encode_instruction(instruction, section_pc, &assembler.symbol_table)
-                .unwrap_or_default();
+            let external_transfer = external_absolute_transfer(instruction, ast);
+            let encoded = if let Some((opcode, _)) = external_transfer {
+                let mut bytes = opcode.to_le_bytes().to_vec();
+                bytes.extend_from_slice(&[0, 0, 0, 0]);
+                bytes
+            } else {
+                encoder::encode_instruction(instruction, section_pc, &assembler.symbol_table)
+                    .unwrap_or_default()
+            };
 
             let symbol = match instruction {
                 Instruction::Jr { label }
@@ -332,40 +344,29 @@ pub type Instruction = parser::ParsedInstruction;
 
 fn layout_instruction_size(instruction: &Instruction, address: u32, symbols: &SymbolTable) -> u32 {
     match instruction {
-        Instruction::Jr { .. } | Instruction::Jrcc { .. } | Instruction::Jeq { .. }
-        | Instruction::Jne { .. } | Instruction::Jlt { .. } | Instruction::Jgt { .. }
-        | Instruction::LongJrcc { .. } => {
-            encoder::encode_instruction(instruction, address, symbols)
-                .map(|bytes| bytes.len() as u32).unwrap_or(2)
-        }
         Instruction::Label(_) | Instruction::Equ { .. } | Instruction::Usect { .. }
         | Instruction::MacroDef { .. } | Instruction::MacroEnd => 0,
-        Instruction::Directive { name, args } if name.eq_ignore_ascii_case(".WORD") => (args.len() * 2) as u32,
         Instruction::Directive { name, .. } if name.eq_ignore_ascii_case("MMTM") || name.eq_ignore_ascii_case("MMFM") => 4,
-        Instruction::Directive { .. } => 0,
-        Instruction::Move { src, dst, field, .. } => {
-            let mut extra = usize::from(matches!(src, Operand::Immediate(_) | Operand::Symbol(_)));
-            extra += usize::from(matches!(src, Operand::DirectMemory(_) | Operand::IndirectOffset(_, _)));
-            extra += usize::from(matches!(dst, Operand::DirectMemory(_) | Operand::IndirectOffset(_, _)));
-            extra += usize::from(field.is_some());
-            2 + (extra * 2) as u32
-        }
-        Instruction::Add { src, dst } | Instruction::Sub { src, dst }
-        | Instruction::Sll { src, dst } | Instruction::Srl { src, dst }
-        | Instruction::And { src, dst } | Instruction::Or { src, dst }
-        | Instruction::Xor { src, dst } => {
-            let mut extra = usize::from(matches!(src, Operand::Immediate(_) | Operand::Symbol(_)));
-            extra += usize::from(matches!(src, Operand::DirectMemory(_) | Operand::IndirectOffset(_, _)));
-            extra += usize::from(matches!(dst, Operand::DirectMemory(_) | Operand::IndirectOffset(_, _)));
-            2 + (extra * 2) as u32
-        }
-        Instruction::Cmp { src, .. } => if matches!(src, Operand::Immediate(_) | Operand::Symbol(_)) { 4 } else { 2 },
-        Instruction::Call { .. } | Instruction::Callr { .. } => 4,
-        Instruction::Calla { .. } | Instruction::Jacc { .. } => 6,
-        Instruction::Setf { .. } => 4,
-        Instruction::Jmp { .. } | Instruction::Rets => 2,
-        _ => 2,
+        _ => encoder::encode_instruction(instruction, address, symbols)
+            .map(|bytes| bytes.len() as u32)
+            .unwrap_or(0),
     }
+}
+
+fn external_absolute_transfer<'a>(instruction: &'a Instruction, ast: &[Instruction]) -> Option<(u16, &'a str)> {
+    let (opcode, target) = match instruction {
+        Instruction::Call { label } | Instruction::Callr { label } => (0xEB00, label.as_str()),
+        Instruction::Jr { label } => (0xC080, label.as_str()),
+        Instruction::Jeq { label } => (0xCA80, label.as_str()),
+        Instruction::Jne { label } => (0xCB80, label.as_str()),
+        Instruction::Jlt { target } => (0xC480, target.as_str()),
+        Instruction::Jgt { target } => (0xC780, target.as_str()),
+        Instruction::Jrcc { condition, target } => (0xC080 | ((*condition as u16) << 8), target.as_str()),
+        Instruction::LongJrcc { condition, target } => (0xC080 | ((*condition as u16) << 8), target.as_str()),
+        _ => return None,
+    };
+    let local = ast.iter().any(|candidate| matches!(candidate, Instruction::Label(name) if name.eq_ignore_ascii_case(target)));
+    (!local).then_some((opcode, target))
 }
 
 pub struct Assembler {
@@ -754,11 +755,18 @@ impl Assembler {
                             | "MMFM"
                             | "EXGPC"
                             | "TRAP"
+                            | "LINE"
                     );
                     let is_directive = first_word.starts_with('.');
                     let is_macro = self.macro_table.contains_key(&upper_first);
 
-                    if !is_opcode
+                    if upper_first == "NOP"
+                        && parts.get(1).is_some_and(|word| matches!(word.to_ascii_uppercase().as_str(), "DSJ" | "DSJS"))
+                    {
+                        label_name_to_insert = first_word.to_string();
+                        is_label = true;
+                        trimmed = trimmed[first_word.len()..].trim();
+                    } else if !is_opcode
                         && !is_directive
                         && !is_macro
                         && first_word
@@ -853,6 +861,7 @@ impl Assembler {
                                     | "MMTM"
                                     | "EXGPC"
                                     | "TRAP"
+                                    | "LINE"
                             );
                             if second_word.starts_with('.')
                                 || second_is_opcode
@@ -889,7 +898,8 @@ impl Assembler {
                 if parts.len() >= 2 {
                     let alias = parts[1].trim();
                     if !alias.is_empty() {
-                        self.symbol_table.insert(alias.to_string(), 0);
+                        let value = self.eval_arithmetic(parts[0].trim()) as u32;
+                        self.symbol_table.insert(alias.to_string(), value);
                     }
                 }
                 ast.push(Instruction::Directive {
@@ -914,9 +924,8 @@ impl Assembler {
                         if parts.len() >= 2 {
                             let alias = parts[1].trim();
                             if !alias.is_empty() {
-                                if self.symbol_table.get(alias).is_none() {
-                                    self.symbol_table.insert(alias.to_string(), 0);
-                                }
+                                let value = self.eval_arithmetic(parts[0].trim()) as u32;
+                                self.symbol_table.insert(alias.to_string(), value);
                             }
                         }
                     }
