@@ -55,6 +55,8 @@ fn fmt_operand(op: &Operand) -> String {
 
 fn describe(instr: &ParsedInstruction) -> String {
     match instr {
+        ParsedInstruction::Native(native) => format!("{:?}",native),
+        ParsedInstruction::Dsjcc {reg,target,condition} => format!("DSJ{} {:?},{}",if *condition==0 {"EQ"} else {"NE"},reg,target),
         ParsedInstruction::Nop => "NOP".to_string(),
         ParsedInstruction::Inc { dst } => format!("INC {}", fmt_operand(dst)),
         ParsedInstruction::Dec { dst } => format!("DEC {}", fmt_operand(dst)),

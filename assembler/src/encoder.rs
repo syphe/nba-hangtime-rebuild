@@ -29,7 +29,7 @@ pub fn encode_register(reg: &Register) -> u8 {
     }
 }
 
-fn same_file_registers(src: &Register, dst: &Register) -> Result<u16, EncodeError> {
+pub(crate) fn same_file_registers(src: &Register, dst: &Register) -> Result<u16, EncodeError> {
     let s = encode_register(src) as u16;
     let d = encode_register(dst) as u16;
     // Register 15 is the shared stack pointer in either register file.
@@ -76,6 +76,14 @@ pub fn encode_instruction(
     let mut bytes = Vec::new();
 
     match instr {
+        ParsedInstruction::Native(instruction) => return instruction.encode(symbols),
+        ParsedInstruction::Dsjcc { reg, target, condition } => {
+            let address = symbols.get(target).or_else(|| symbols.get_ignore_case(target)).copied().unwrap_or(current_addr);
+            let delta = address as i64 - (current_addr+4) as i64;
+            if delta%2!=0 || !(i16::MIN as i64..=i16::MAX as i64).contains(&(delta/2)) {return Err(EncodeError::InvalidOperand);}
+            bytes.extend_from_slice(&((if *condition==0 {0x0da0} else {0x0dc0}) | encode_register(reg) as u16).to_le_bytes());
+            bytes.extend_from_slice(&((delta/2) as i16).to_le_bytes());
+        }
         ParsedInstruction::Nop => {
             bytes.extend_from_slice(&0x0300u16.to_le_bytes());
         }
@@ -690,153 +698,13 @@ pub fn generate_binary(
 pub fn resolve_immediate(op: &Operand, symbols: &SymbolTable) -> Result<i32, EncodeError> {
     match op {
         Operand::Immediate(n) => Ok(*n),
-        Operand::Symbol(s) => {
-            // Check if it's a direct symbol lookup first and cast to i32
-            if let Some(&val) = symbols.get(s).or_else(|| symbols.get_ignore_case(s)) {
-                return Ok(val as i32);
-            }
-            if let Some(inner) = s.strip_prefix('~') {
-                if let Some(&val) = symbols
-                    .get(inner)
-                    .or_else(|| symbols.get_ignore_case(inner))
-                {
-                    return Ok(!(val as i32));
-                }
-            }
-            if let Ok(n) = s.parse::<i32>() {
-                return Ok(n);
-            }
-
-            // Handle basic expressions such as arithmetic and bitwise OR.
-            let expression = s
-                .trim()
-                .trim_start_matches('(')
-                .trim_end_matches(')')
-                .trim();
-            if expression.contains('+')
-                || expression.contains('-')
-                || expression.contains('*')
-                || expression.contains('/')
-                || expression.contains('|')
-            {
-                return resolve_immed_expr_part(expression, symbols).or(Ok(0));
-            }
-            if let Some(inner) = expression.strip_prefix('~') {
-                return Ok(!resolve_immed_expr_part(inner, symbols)?);
-            }
-            if expression.contains('*') {
-                let parts: Vec<&str> = expression.split('*').collect();
-                if parts.len() == 2 {
-                    let left = resolve_immed_expr_part(parts[0].trim(), symbols)?;
-                    let right = resolve_immed_expr_part(parts[1].trim(), symbols)?;
-                    return Ok(left * right);
-                }
-            } else if expression.contains('|') {
-                let parts: Vec<&str> = expression.split('|').collect();
-                if parts.len() == 2 {
-                    let left = resolve_immed_expr_part(parts[0].trim(), symbols)?;
-                    let right = resolve_immed_expr_part(parts[1].trim(), symbols)?;
-                    return Ok(left | right);
-                }
-            } else if s.contains('/') {
-                let parts: Vec<&str> = s.split('/').collect();
-                if parts.len() == 2 {
-                    let left = resolve_immed_expr_part(parts[0].trim(), symbols)?;
-                    let right = resolve_immed_expr_part(parts[1].trim(), symbols)?;
-                    if right != 0 {
-                        return Ok(left / right);
-                    }
-                    return Ok(0);
-                }
-            } else if s.contains('+') {
-                let parts: Vec<&str> = s.split('+').collect();
-                if parts.len() == 2 {
-                    let left = resolve_immed_expr_part(parts[0].trim(), symbols)?;
-                    let right = resolve_immed_expr_part(parts[1].trim(), symbols)?;
-                    return Ok(left + right);
-                }
-            } else if s.contains('-') && !s.starts_with('-') {
-                let parts: Vec<&str> = s.split('-').collect();
-                if parts.len() == 2 {
-                    let left = resolve_immed_expr_part(parts[0].trim(), symbols)?;
-                    let right = resolve_immed_expr_part(parts[1].trim(), symbols)?;
-                    return Ok(left - right);
-                }
-            }
-
-            if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                Ok(0)
-            } else {
-                Err(EncodeError::UndefinedSymbol(s.clone()))
-            }
-        }
-        _ => Err(EncodeError::UnsupportedInstruction),
+        Operand::Symbol(expression) => resolve_immed_expr_part(expression,symbols),
+        _ => Err(EncodeError::InvalidOperand),
     }
 }
 
-fn resolve_immed_expr_part(part: &str, symbols: &SymbolTable) -> Result<i32, EncodeError> {
-    let part = part
-        .trim()
-        .trim_start_matches('#')
-        .trim_start_matches('(')
-        .trim_end_matches(')')
-        .trim();
-    if let Some(&val) = symbols.get(part) {
-        Ok(val as i32)
-    } else if let Some(val) = symbols.get_ignore_case(part) {
-        Ok(*val as i32)
-    } else if let Ok(n) = part.parse::<i32>() {
-        Ok(n)
-    } else if let Some(hex) = part.strip_prefix('$') {
-        i32::from_str_radix(hex, 16).map_err(|_| EncodeError::UndefinedSymbol(part.to_string()))
-    } else if part.len() > 1 && (part.ends_with('H') || part.ends_with('h')) {
-        let hex = &part[..part.len() - 1];
-        i32::from_str_radix(hex, 16).map_err(|_| EncodeError::UndefinedSymbol(part.to_string()))
-    } else if part.len() > 1 && (part.ends_with('B') || part.ends_with('b'))
-        && part[..part.len() - 1].chars().all(|ch| matches!(ch, '0' | '1'))
-    {
-        i32::from_str_radix(&part[..part.len() - 1], 2)
-            .map_err(|_| EncodeError::UndefinedSymbol(part.to_string()))
-    } else if part.contains('*') {
-        let pieces: Vec<&str> = part.splitn(2, '*').collect();
-        if pieces.len() == 2 {
-            return Ok(resolve_immed_expr_part(pieces[0].trim(), symbols)?
-                * resolve_immed_expr_part(pieces[1].trim(), symbols)?);
-        }
-        Err(EncodeError::UndefinedSymbol(part.to_string()))
-    } else if part.contains('/') {
-        let pieces: Vec<&str> = part.splitn(2, '/').collect();
-        if pieces.len() == 2 {
-            let divisor = resolve_immed_expr_part(pieces[1].trim(), symbols)?;
-            return if divisor == 0 {
-                Ok(0)
-            } else {
-                Ok(resolve_immed_expr_part(pieces[0].trim(), symbols)? / divisor)
-            };
-        }
-        Err(EncodeError::UndefinedSymbol(part.to_string()))
-    } else if part.contains('+') {
-        let pieces: Vec<&str> = part.splitn(2, '+').collect();
-        if pieces.len() == 2 {
-            return Ok(resolve_immed_expr_part(pieces[0].trim(), symbols)?
-                + resolve_immed_expr_part(pieces[1].trim(), symbols)?);
-        }
-        Err(EncodeError::UndefinedSymbol(part.to_string()))
-    } else if part.contains('-') && !part.starts_with('-') {
-        let pieces: Vec<&str> = part.split('-').collect();
-        if pieces.len() == 2 {
-            return Ok(resolve_immed_expr_part(pieces[0].trim(), symbols)?
-                - resolve_immed_expr_part(pieces[1].trim(), symbols)?);
-        }
-        Err(EncodeError::UndefinedSymbol(part.to_string()))
-    } else {
-        // Forward assembly data and local aliases may not be present in the
-        // symbol table yet. Treat unresolved bare data expressions as zero for
-        // incremental image generation rather than aborting symbol resolution.
-        if part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            Ok(0)
-        } else {
-            Err(EncodeError::UndefinedSymbol(part.to_string()))
-        }
-    }
+fn resolve_immed_expr_part(expression: &str, symbols: &SymbolTable) -> Result<i32, EncodeError> {
+    crate::parser::evaluate_arithmetic_checked(expression.trim().trim_start_matches('#'), |name| {
+        symbols.get(name).or_else(|| symbols.get_ignore_case(name)).copied().unwrap_or(0) as i32
+    }).map_err(|_| EncodeError::InvalidDirectiveArg(expression.to_string()))
 }

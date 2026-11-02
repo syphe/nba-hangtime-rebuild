@@ -9,6 +9,7 @@ use std::fs;
 mod dump;
 mod encoder;
 mod interleaver;
+mod isa;
 mod parser;
 mod verify;
 use parser::{MacroTemplate, Operand, ParsedInstruction};
@@ -142,42 +143,11 @@ struct ObjectFixup {
 }
 
 fn is_symbolic_expression(value: &str) -> bool {
-    let value = value.trim();
-    if value.is_empty()
-        || value.starts_with('$')
-        || value.starts_with("0x")
-        || value.starts_with("0X")
-        || value.parse::<i64>().is_ok()
-    {
-        return false;
-    }
-    if let Some(hex) = value.strip_suffix('h').or_else(|| value.strip_suffix('H')) {
-        if !hex.is_empty() && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
-            return false;
-        }
-    }
-    if let Some(binary) = value.strip_suffix('b').or_else(|| value.strip_suffix('B')) {
-        if !binary.is_empty() && binary.chars().all(|ch| matches!(ch, '0' | '1')) {
-            return false;
-        }
-    }
-    value.chars().any(|ch| ch.is_ascii_alphabetic() || ch == '_' || ch == '#')
+    let symbolic=std::cell::Cell::new(false);
+    let _=parser::evaluate_arithmetic_checked(value, |_| {symbolic.set(true);0});
+    symbolic.get()
 }
 
-fn expression_references_symbol(value: &str, names: &HashSet<String>) -> bool {
-    let mut token = String::new();
-    for ch in value.chars().chain(std::iter::once(' ')) {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '#' {
-            token.push(ch.to_ascii_uppercase());
-        } else {
-            if names.contains(&token) {
-                return true;
-            }
-            token.clear();
-        }
-    }
-    false
-}
 
 #[derive(Serialize, Clone)]
 struct ObjectSection {
@@ -357,6 +327,7 @@ impl ObjectFile {
                     _ => None,
                 },
                 Instruction::Dsjs { target, .. } if target != "$" => Some(target.as_str()),
+                Instruction::Dsjcc { target, .. } => Some(target.as_str()),
                 Instruction::Move { src: Operand::Symbol(name), .. } => Some(name.as_str()),
                 _ => None,
             };
@@ -381,7 +352,7 @@ impl ObjectFile {
                         Instruction::Calla { .. } | Instruction::Move { .. } => "absolute32",
                         Instruction::Jacc { .. } | Instruction::Jmp { .. } => "absolute32",
                         Instruction::Dsjs { short: true, .. } => "tms34010-dsjs5",
-                        Instruction::Dsjs { short: false, .. } => "tms34010-relative16",
+                        Instruction::Dsjs { short: false, .. } | Instruction::Dsjcc { .. } => "tms34010-relative16",
                         _ if matches!(instruction, Instruction::Call { .. } | Instruction::Callr { .. }) && encoded.len() == 6 => "absolute32",
                         _ if is_rel_branch && encoded.len() == 6 => "absolute32",
                         Instruction::Call { .. } | Instruction::Callr { .. } => "tms34010-relative16",
@@ -415,6 +386,12 @@ impl ObjectFile {
                             });
                         }
                     }
+                }
+            }
+            if let Instruction::Native(native) = instruction {
+                if let Some((symbol,width)) = native.immediate_fixup() {
+                    fixups.push(ObjectFixup {offset:section_pc+2,object_offset:offset+2,
+                        section:current_section.clone(),symbol,kind:if width==2 {"absolute16"} else {"absolute32"}.into()});
                 }
             }
             if let Instruction::Move { src, dst, .. } | Instruction::Movb { src, dst } = instruction {
@@ -500,6 +477,11 @@ fn layout_instruction_size(instruction: &Instruction, address: u32, symbols: &Sy
     match instruction {
         Instruction::Label(_) | Instruction::Equ { .. } | Instruction::Usect { .. }
         | Instruction::MacroDef { .. } | Instruction::MacroEnd => 0,
+        Instruction::Native(native) => if matches!(native.format,isa::Format::Immediate {..})
+            || matches!(native.format,isa::Format::Alu {..}) && !matches!(native.operands.first(),Some(Operand::Reg(_))) {
+                2+native.width.unwrap_or(4) as u32
+            } else {2},
+        Instruction::Dsjcc {..} => 4,
         Instruction::Directive { name, .. } if name.eq_ignore_ascii_case("MMTM") || name.eq_ignore_ascii_case("MMFM") => 4,
         _ => encoder::encode_instruction(instruction, address, symbols)
             .map(|bytes| bytes.len() as u32)
@@ -736,8 +718,8 @@ mod loop_expression_tests {
     #[test]
     fn omitted_instruction_diagnostic_counts_mnemonics_but_not_metadata() {
         let mut assembler = Assembler::new();
-        let ast = assembler.pass_one(&["SEXT a0,1", "sext a1,1", ".title sample", "nop", "mmtm sp,a0"]).unwrap();
-        assert_eq!(omitted_instructions(&ast), vec![OmittedInstruction { mnemonic: "SEXT".into(), count: 2, examples: vec!["a0, 1".into(),"a1, 1".into()] }]);
+        let ast = assembler.pass_one(&["UNSUPPORTED a0,1", "unsupported a1,1", ".title sample", "nop", "mmtm sp,a0"]).unwrap();
+        assert_eq!(omitted_instructions(&ast), vec![OmittedInstruction { mnemonic: "UNSUPPORTED".into(), count: 2, examples: vec!["a0, 1".into(),"a1, 1".into()] }]);
     }
 
     #[test]
@@ -927,6 +909,35 @@ impl Assembler {
             }
         }
         self.eval_arithmetic(expression)
+    }
+
+    fn freeze_expression(&self, expression: &str, volatile: &HashSet<String>) -> String {
+        fn rewrite(text: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
+            let mut result = String::new();
+            let mut chars = text.char_indices().peekable();
+            while let Some((start,c)) = chars.next() {
+                if c == '\'' {
+                    result.push(c);
+                    for (_,quoted) in chars.by_ref() {result.push(quoted);if quoted=='\'' {break;}}
+                } else if c.is_ascii_alphanumeric() || matches!(c,'_'|'#'|'$') {
+                    let mut end=start+c.len_utf8();
+                    while let Some((position,c))=chars.peek().copied() {
+                        if c.is_ascii_alphanumeric() || matches!(c,'_'|'#'|'$'|'.') {end=position+c.len_utf8();chars.next();} else {break;}
+                    }
+                    let token=&text[start..end];result.push_str(&lookup(token).unwrap_or_else(||token.to_string()));
+                } else {result.push(c);}
+            }
+            result
+        }
+        let mut result=expression.to_string();
+        for _ in 0..16 {
+            let next=rewrite(&result,|name|self.assignment_aliases.get(name).cloned());
+            if next==result {break;} result=next;
+        }
+        rewrite(&result,|name| {
+            volatile.contains(&name.to_ascii_uppercase()).then(||format!("({})",self.symbol_table.get(name)
+                .or_else(||self.symbol_table.get_ignore_case(name)).copied().unwrap_or(0) as i32))
+        })
     }
 
     fn eval_arithmetic(&self, expression: &str) -> i32 {
@@ -1155,7 +1166,20 @@ impl Assembler {
                         let mut value = value;
                         let words: Vec<&str> = trimmed.split_whitespace().collect();
                         if words.len() >= 3 {
-                            let expression = words[2..].join(" ");
+                            let expression = self.freeze_expression(&words[2..].join(" "),&volatile_symbols);
+                            let expression = if expression.contains('$') {
+                                let pc_name=format!("__equate_pc_{}",ast.len());
+                                let rewritten=expression.split('$').enumerate().map(|(i,part)| {
+                                    if i==0 {part.to_string()} else if part.chars().next().is_some_and(|c|c.is_ascii_hexdigit()) {
+                                        format!("${part}")
+                                    } else {format!("{pc_name}{part}")}
+                                }).collect::<String>();
+                                if rewritten!=expression {
+                                    self.symbol_table.insert(pc_name.clone(),self.current_address);
+                                    ast.push(Instruction::Label(pc_name));
+                                }
+                                rewritten
+                            } else {expression};
                             let register = self.register_aliases.get(expression.trim()).cloned().or_else(|| {
                                 parser::parse_register(expression.trim()).ok()
                                     .filter(|(rest, _)| rest.is_empty())
@@ -1201,7 +1225,7 @@ impl Assembler {
                     .get(&parts[0].to_uppercase())
                     .cloned()
                     .map(|template| (template, 0usize, None));
-                let labeled = if parts.len() > 1 {
+                let labeled = if parts.len() > 1 && !parser::is_mnemonic(parts[0]) {
                     self.macro_table
                         .get(&parts[1].to_uppercase())
                         .cloned()
@@ -1278,6 +1302,7 @@ impl Assembler {
             } else if let Some(stripped) = trimmed.strip_suffix(':') {
                 label_name_to_insert = stripped.trim().to_string();
                 is_label = true;
+                trimmed = "";
             } else {
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
                 if !parts.is_empty() {
@@ -1357,14 +1382,15 @@ impl Assembler {
                             | "TRAP"
                             | "LINE"
                     );
-                    let is_opcode = is_opcode || parser::branch_condition(first_word).is_some();
+                    let is_opcode = is_opcode || isa::format(first_word).is_some() || parser::branch_condition(first_word).is_some() || matches!(upper_first.as_str(),"DSJEQ"|"DSJNE");
                     let is_directive = first_word.starts_with('.');
                     let is_macro = self.macro_table.get(&upper_first).is_some_and(|template| {
                         template.params.is_empty() || parts.len() > 1
                     });
 
-                    if upper_first == "NOP"
-                        && parts.get(1).is_some_and(|word| matches!(word.to_ascii_uppercase().as_str(), "DSJ" | "DSJS"))
+                    if (upper_first == "NOP"
+                        && parts.get(1).is_some_and(|word| matches!(word.to_ascii_uppercase().as_str(), "DSJ" | "DSJS")))
+                        || (upper_first=="ADD" && parts.get(1).is_some_and(|word|word.eq_ignore_ascii_case("ADDI")))
                     {
                         label_name_to_insert = first_word.to_string();
                         is_label = true;
@@ -1469,7 +1495,7 @@ impl Assembler {
                                     | "TRAP"
                                     | "LINE"
                             );
-                            let second_is_opcode = second_is_opcode || parser::branch_condition(second_word).is_some();
+                            let second_is_opcode = second_is_opcode || isa::format(second_word).is_some() || parser::branch_condition(second_word).is_some() || matches!(upper_second.as_str(),"DSJEQ"|"DSJNE");
                             if second_word.starts_with('.')
                                 || second_is_opcode
                                 || self.macro_table.contains_key(&upper_second)
@@ -1501,13 +1527,14 @@ impl Assembler {
                     .skip(1)
                     .collect::<Vec<_>>()
                     .join(" ");
-                let parts: Vec<&str> = assignment.split(',').collect();
+                let parts = parser::split_asm_operands(&assignment);
                 if parts.len() >= 2 {
                     let alias = parts[1].trim();
                     if !alias.is_empty() {
-                        let value = self.eval_arithmetic(parts[0].trim()) as u32;
+                        let expression = self.freeze_expression(parts[0].trim(),&volatile_symbols);
+                        let value = self.eval_arithmetic(&expression) as u32;
                         self.symbol_table.insert(alias.to_string(), value);
-                        self.assignment_aliases.insert(alias.to_string(), parts[0].trim().to_string());
+                        self.assignment_aliases.insert(alias.to_string(),expression);
                     }
                 }
                 ast.push(Instruction::Directive {
@@ -1526,11 +1553,7 @@ impl Assembler {
                 if name.eq_ignore_ascii_case(".WORD") || name.eq_ignore_ascii_case(".LONG") {
                     for arg in &mut args {
                         *arg = arg.trim_start_matches('#').trim().to_string();
-                        if !arg.starts_with('[')
-                            && expression_references_symbol(arg, &volatile_symbols)
-                        {
-                            *arg = self.eval_arithmetic(arg).to_string();
-                        }
+                        *arg = self.freeze_expression(arg,&volatile_symbols);
                     }
                 }
 
@@ -1630,7 +1653,7 @@ impl Assembler {
                 parser_trimmed = format!("{} {}", mnemonic, if explicit_local { operands.to_string() } else { substitute_macro_parameters(operands, &names, &registers) });
             }
             let upper_pt = parser_trimmed.to_uppercase();
-            if (upper_pt.starts_with("MOVI")
+            if isa::format(upper_pt.split_whitespace().next().unwrap_or("")).is_none() && (upper_pt.starts_with("MOVI")
                 || upper_pt.starts_with("ADD")
                 || upper_pt.starts_with("SUB"))
                 && (parser_trimmed.ends_with(",L")
@@ -1650,7 +1673,28 @@ impl Assembler {
             }
 
             match parser::parse_line(&parser_trimmed) {
-                Ok((_, instruction)) => {
+                Ok((_, mut instruction)) => {
+                    let freeze = |operand: &mut Operand| match operand {
+                        Operand::Symbol(text)|Operand::DirectMemory(text)|Operand::IndirectOffset(_,text) => {
+                            *text=self.freeze_expression(text,&volatile_symbols);
+                        }, _ => {},
+                    };
+                    match &mut instruction {
+                        Instruction::Native(native) if !matches!(native.format,isa::Format::Pixblt) => {
+                            for operand in &mut native.operands {freeze(operand);}
+                        }
+                        Instruction::Move {src,dst,field} => {freeze(src);freeze(dst);if let Some(field)=field {freeze(field);}}
+                        Instruction::Movb {src,dst} => {freeze(src);freeze(dst);}
+                        _ => {},
+                    }
+                    let target=match &mut instruction {
+                        Instruction::Jr {label}|Instruction::Jeq {label}|Instruction::Jne {label} => Some(label),
+                        Instruction::Jrcc {target,..}|Instruction::Jacc {target,..} => Some(target),_=>None,
+                    };
+                    if let Some(target)=target.filter(|t|t.as_str()=="$") {
+                        *target=format!("__current_pc_{}",ast.len());
+                        ast.push(Instruction::Label(target.clone()));
+                    }
                     match &instruction {
                         Instruction::Move { src, dst, field } => {
                             let mut extra_words = 0;
@@ -1760,7 +1804,7 @@ impl Assembler {
                 Instruction::Jr { label } | Instruction::Jeq { label } | Instruction::Jne { label }
                 | Instruction::Call { label } | Instruction::Callr { label } => Some(label),
                 Instruction::Jrcc { target, .. } | Instruction::Jacc { target, .. } | Instruction::LongJrcc { target, .. }
-                | Instruction::Jlt { target } | Instruction::Jgt { target } | Instruction::Dsjs { target, .. } => Some(target),
+                | Instruction::Jlt { target } | Instruction::Jgt { target } | Instruction::Dsjs { target, .. } | Instruction::Dsjcc { target, .. } => Some(target),
                 _ => None,
             };
             if let Some(target) = target.filter(|name| name.starts_with('#')) {
@@ -1804,6 +1848,7 @@ impl Assembler {
         }
         let mut latest_equates = HashMap::<String, String>::new();
         for (name, expression) in pending_equates.drain(..) {
+            if volatile_symbols.contains(&name.to_ascii_uppercase()) {continue;}
             latest_equates.insert(name, expression);
         }
         let mut pending_equates: Vec<(String, String)> = latest_equates.into_iter().collect();
@@ -1811,6 +1856,7 @@ impl Assembler {
         let layout_names: Vec<String> = ast.iter().filter_map(|instruction| {
             if let Instruction::Label(name) = instruction { Some(name.clone()) } else { None }
         }).collect();
+        let layout_set:HashSet<_>=layout_names.iter().cloned().collect();
         let branch_count = ast.iter().filter(|instruction| matches!(
             instruction,
             Instruction::Jr { .. } | Instruction::Jrcc { .. } | Instruction::Jeq { .. }
@@ -1870,7 +1916,7 @@ impl Assembler {
 
             // Resolve forward and chained equates using the latest label layout.
             let mut symbols: HashMap<String, u32> = self.symbol_table.symbols.iter()
-                    .map(|(key, value)| (key.to_ascii_uppercase(), *value)).collect();
+                    .map(|(key, value)| (key.to_ascii_uppercase(), if layout_set.contains(key) {value.wrapping_mul(8)} else {*value})).collect();
             // Legacy equate chains are shallow; cap malformed or cyclic chains
             // so branch relaxation does not multiply their cost across every pass.
             let max_equate_passes = pending_equates.len().min(16);
@@ -1899,7 +1945,7 @@ impl Assembler {
         // Finish deeper equate chains once the final label addresses are known.
         for _ in 0..256 {
             let mut symbols: HashMap<String, u32> = self.symbol_table.symbols.iter()
-                .map(|(key, value)| (key.to_ascii_uppercase(), *value)).collect();
+                .map(|(key, value)| (key.to_ascii_uppercase(), if layout_set.contains(key) {value.wrapping_mul(8)} else {*value})).collect();
             let values: Vec<(String, u32)> = pending_equates.iter().map(|(name, expr)| {
                 (name.clone(), parser::parse_expression_value(&format!(".equ {} {}", name, expr), &symbols) as u32)
             }).collect();
@@ -1997,6 +2043,9 @@ fn main() -> Result<(), AsmError> {
     }
 
     if args.verbose {
+        for omission in &omissions {
+            eprintln!("Omitted {}: {}",omission.mnemonic,omission.examples.join(" | "));
+        }
         println!("Symbol Table: {:?}", assembler.symbol_table);
     }
 
@@ -2079,3 +2128,6 @@ fn main() -> Result<(), AsmError> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod isa_tests;

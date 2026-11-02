@@ -4,7 +4,6 @@
 import argparse
 import base64
 import json
-import ast
 import re
 import struct
 from pathlib import Path
@@ -184,13 +183,24 @@ def compare_coff(path: Path, legacy_path: Path):
         print(f"  {name}: legacy={wanted}, generated={got}")
 
 
-def resolve_expression(expression: str, symbols: dict[str, int], signed_constants: set[str] | None = None):
+def compile_symbol_pattern(symbols):
+    names = sorted(symbols, key=len, reverse=True)
+    return re.compile(r"(?<![A-Za-z0-9_])(" + "|".join(re.escape(name) for name in names)
+                      + r")(?=$|[^A-Za-z0-9_])",re.IGNORECASE) if names else None
+
+
+def resolve_expression(expression: str, symbols: dict[str, int], signed_constants: set[str] | None = None,
+                       symbol_pattern=None):
     text = expression.strip()
-    # Legacy coordinate pairs use [x,y] as a packed 32-bit value with y in
-    # the high word and x in the low word (equivalent to y*10000h+x).
+    # DIAG's $100/$110 names are local labels in branch operands. Resolve
+    # complete names before treating an otherwise numeric $ prefix as hex.
+    exact_symbol = symbols.get(text.lower())
+    if exact_symbol is not None:
+        return exact_symbol
+    # Preserved MENU.LST: the first coordinate occupies the high word.
     text = re.sub(
         r"\[\s*([^\[\],]+)\s*,\s*([^\[\]]+)\s*\]",
-        lambda match: f"(({match.group(2).strip()})*0x10000+({match.group(1).strip()}))",
+        lambda match: f"((({match.group(1).strip()})&0xffff)*0x10000+(({match.group(2).strip()})&0xffff))",
         text,
     )
     text = re.sub(r"'([^'\\])'", lambda match: str(ord(match.group(1))), text)
@@ -200,10 +210,6 @@ def resolve_expression(expression: str, symbols: dict[str, int], signed_constant
         lambda match: str(int(match.group(1), 2)),
         text,
     )
-    exact_symbol = symbols.get(text.lower())
-    if exact_symbol is not None:
-        return exact_symbol
-
     def legacy_hex(match):
         token = match.group(0)
         return str(int(token[:-1], 16))
@@ -220,12 +226,8 @@ def resolve_expression(expression: str, symbols: dict[str, int], signed_constant
         text,
     )
 
-    symbol_names = sorted(symbols, key=len, reverse=True)
-    if symbol_names:
-        symbol_pattern = re.compile(
-            r"(?<![A-Za-z0-9_])(" + "|".join(re.escape(name) for name in symbol_names) + r")(?=$|[^A-Za-z0-9_])",
-            re.IGNORECASE,
-        )
+    symbol_pattern = symbol_pattern or compile_symbol_pattern(symbols)
+    if symbol_pattern:
         def symbol_value(match):
             name = match.group(1).lower()
             value = symbols[name]
@@ -235,38 +237,57 @@ def resolve_expression(expression: str, symbols: dict[str, int], signed_constant
         text = symbol_pattern.sub(symbol_value, text)
     text = text.replace("|", " | ")
 
-    try:
-        tree = ast.parse(text, mode="eval")
-    except SyntaxError as error:
-        raise ValueError(f"unsupported relocation expression {expression!r}") from error
-
-    def evaluate(node):
-        if isinstance(node, ast.Expression):
-            return evaluate(node.body)
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-            return int(node.value)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str) and len(node.value) == 1:
-            return ord(node.value)
-        if isinstance(node, ast.UnaryOp):
-            value = evaluate(node.operand)
-            if isinstance(node.op, ast.UAdd): return value
-            if isinstance(node.op, ast.USub): return -value
-            if isinstance(node.op, ast.Invert): return ~value
-        if isinstance(node, ast.BinOp):
-            left, right = evaluate(node.left), evaluate(node.right)
-            if isinstance(node.op, ast.Add): return left + right
-            if isinstance(node.op, ast.Sub): return left - right
-            if isinstance(node.op, ast.Mult): return left * right
-            if isinstance(node.op, ast.Div): return int(left / right)
-            if isinstance(node.op, ast.FloorDiv): return left // right
-            if isinstance(node.op, ast.BitOr): return left | right
-            if isinstance(node.op, ast.BitAnd): return left & right
-            if isinstance(node.op, ast.BitXor): return left ^ right
-            if isinstance(node.op, ast.LShift): return left << right
-            if isinstance(node.op, ast.RShift): return left >> right
+    # TI Table 4-1, unlike Python/C: + - & | ^ share one group;
+    # * / % << >> share the next group. Evaluate each group left to right.
+    tokens = re.findall(r'0[xX][0-9a-fA-F]+|[0-9]+|<<|>>|//|[()+*/%&|^~<>-]', text)
+    if ''.join(tokens) != re.sub(r'\s+', '', text):
         raise ValueError(f"unsupported relocation expression {expression!r}")
+    position = 0
 
-    return evaluate(tree)
+    def evaluate(minimum=0):
+        nonlocal position
+        if position >= len(tokens):
+            raise ValueError(f"incomplete relocation expression {expression!r}")
+        token = tokens[position]
+        position += 1
+        if token in ('+', '-', '~'):
+            value = evaluate(3)
+            value = -value if token == '-' else ~value if token == '~' else value
+        elif token == '(':
+            value = evaluate()
+            if position >= len(tokens) or tokens[position] != ')':
+                raise ValueError(f"unclosed relocation expression {expression!r}")
+            position += 1
+        else:
+            try:
+                value = int(token, 16 if token.lower().startswith('0x') else 10)
+            except ValueError as error:
+                raise ValueError(f"invalid relocation expression {expression!r}") from error
+        while position < len(tokens):
+            op = tokens[position]
+            precedence = 1 if op in ('+', '-', '&', '|', '^') else 2 if op in ('*', '/', '//', '%', '<<', '>>') else -1
+            if precedence < minimum:
+                break
+            position += 1
+            right = evaluate(precedence+1)
+            if op == '+': value += right
+            elif op == '-': value -= right
+            elif op == '*': value *= right
+            elif op in ('/', '//', '%'):
+                if right == 0: raise ValueError(f"division by zero in {expression!r}")
+                quotient = abs(value)//abs(right) * (-1 if (value<0) != (right<0) else 1)
+                value = value - quotient*right if op == '%' else quotient
+            elif op == '&': value &= right
+            elif op == '|': value |= right
+            elif op == '^': value ^= right
+            elif op == '<<': value <<= right & 31
+            elif op == '>>': value >>= right & 31
+        return value
+
+    result = evaluate()
+    if position != len(tokens):
+        raise ValueError(f"trailing relocation expression text {expression!r}")
+    return result
 
 
 def load_objects(paths: list[Path]):
@@ -445,12 +466,13 @@ def main():
             object_symbols[symbol["name"].lower()] = value
             if symbol["name"].startswith("#"):
                 object_symbols.setdefault(symbol["name"][1:].lower(), value)
+        symbol_pattern = compile_symbol_pattern(object_symbols)
         for fixup in obj.get("fixups", []):
             section = section_name(fixup["section"])
             if section not in ("text", "data") or section not in section_addresses:
                 continue
             try:
-                target = resolve_expression(fixup["symbol"], object_symbols, signed_constants)
+                target = resolve_expression(fixup["symbol"], object_symbols, signed_constants,symbol_pattern)
             except ZeroDivisionError as error:
                 if args.allow_unresolved:
                     unresolved_fixups.append((path, fixup["symbol"]))

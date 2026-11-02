@@ -125,7 +125,7 @@ foreach ($module in $modules) {
     Write-Host "ASSEMBLING: $module.ASM -> $module.OBJ" -ForegroundColor Green
     $arguments = @("--input", $source.FullName, "--output", $object, "--interleave-ways", "1")
     if ($ShowVerbose) { $arguments += "--verbose" }
-    if ($ObjectFormat) { $arguments += "--object-format" }
+    if ($ObjectFormat) { $arguments += @("--object-format", "--deny-omitted-instructions") }
     & $exe @arguments
     if ($LASTEXITCODE -ne 0) {
         Write-Host "FAILED: $module.ASM (exit $LASTEXITCODE)" -ForegroundColor Red
@@ -145,6 +145,12 @@ if ($ObjectFormat) {
         $objects = foreach ($module in $modules) {
             $object = Join-Path $outputDir "$module.OBJ"
             if (Test-Path $object) { $object }
+        }
+        foreach ($object in $objects) {
+            $metadata = Get-Content -LiteralPath $object -Raw | ConvertFrom-Json
+            if ($null -eq $metadata.omitted_instructions -or @($metadata.omitted_instructions).Count -ne 0) {
+                throw "Missing or nonempty instruction coverage metadata in $object; rebuild with complete instruction emission."
+            }
         }
         & python link.py @objects --cmd-file (Join-Path $sourceDir "BB.CMD") `
             --output (Join-Path $outputDir "BB.bin") `

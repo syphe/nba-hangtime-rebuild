@@ -36,6 +36,8 @@ pub enum Operand {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParsedInstruction {
+    Native(crate::isa::NativeInstruction),
+    Dsjcc { reg: Register, target: String, condition: u8 },
     Nop,
     Inc {
         dst: Operand,
@@ -317,50 +319,7 @@ pub fn parse_operand(input: &str) -> IResult<&str, Operand> {
         ),
         parse_indirect_offset,
         map(preceded(char('*'), parse_register), Operand::Indirect),
-        // 2. Comprehensive Immediate / Symbol: #384, #510*01000H, #STACKL/32-32, etc.
-        map(
-            preceded(
-                opt(char('#')),
-                take_while1(|c: char| {
-                    c.is_alphanumeric()
-                        || c == '_'
-                        || c == '$'
-                        || c == '-'
-                        || c == '/'
-                        || c == '*'
-                        || c == '('
-                        || c == ')'
-                        || c == '|'
-                        || c == '&'
-                        || c == '+'
-                        || c == '~'
-                        || c == ' '
-                        || c == '\t'
-                        || c == 'h'
-                        || c == 'H'
-                }),
-            ),
-            |token: &str| {
-                let token_trimmed = token.trim();
-                if let Ok(n) = token_trimmed.parse::<i32>() {
-                    Operand::Immediate(n)
-                } else if let Some(hex) = token_trimmed.strip_prefix('$') {
-                    Operand::Immediate(i32::from_str_radix(hex, 16).unwrap_or(0))
-                } else if let Some(hex) = token_trimmed
-                    .strip_prefix("0x")
-                    .or_else(|| token_trimmed.strip_prefix("0X"))
-                {
-                    Operand::Immediate(i32::from_str_radix(hex, 16).unwrap_or(0))
-                } else if let Some(hex) = token_trimmed
-                    .strip_suffix('h')
-                    .or_else(|| token_trimmed.strip_suffix('H'))
-                {
-                    Operand::Immediate(i32::from_str_radix(hex, 16).unwrap_or(0))
-                } else {
-                    Operand::Symbol(token_trimmed.to_string())
-                }
-            },
-        ),
+        parse_expression_operand,
         map(preceded(char('@'), take_while1(|c: char| c.is_ascii_alphanumeric() || "_.$#()+-*/&|~^ \t".contains(c))),
             |text: &str| Operand::DirectMemory(text.trim().to_string())),
         // 4. Indirect Pre-Decrement: -*A0 (must be before simple indirect)
@@ -447,6 +406,17 @@ pub fn sanitize_line(input: &str) -> String {
 }
 
 pub fn parse_line(input: &str) -> IResult<&str, ParsedInstruction> {
+    let name = input.split_whitespace().next().unwrap_or("");
+    if crate::isa::format(name).is_some() { return crate::isa::parse(input); }
+    if name.eq_ignore_ascii_case("DSJEQ") || name.eq_ignore_ascii_case("DSJNE") {
+        let args = split_asm_operands(input[name.len()..].trim());
+        let invalid = || nom::Err::Error(nom::error::Error::new(input,nom::error::ErrorKind::Tag));
+        if args.len()!=2 {return Err(invalid());}
+        let (rest,reg) = parse_register(&args[0]).map_err(|_| invalid())?;
+        if !rest.is_empty() {return Err(invalid());}
+        let (_,target) = parse_branch_target(&args[1]).map_err(|_| invalid())?;
+        return Ok(("",ParsedInstruction::Dsjcc {reg,target:target.to_string(),condition:if name.eq_ignore_ascii_case("DSJEQ") {0} else {1}}));
+    }
     // No local String allocation here; parse directly against the input slice
     alt((
         alt((
@@ -528,18 +498,21 @@ pub fn parse_unknown_instruction(input: &str) -> IResult<&str, ParsedInstruction
         "",
         ParsedInstruction::Directive {
             name: name.to_uppercase(),
-            args: args
-                .split(',')
-                .map(|arg| arg.trim().to_string())
-                .filter(|arg| !arg.is_empty())
-                .collect(),
+            args: split_asm_operands(args),
         },
     ))
 }
 
+pub fn is_mnemonic(name: &str) -> bool {
+    crate::isa::format(name).is_some() || branch_condition(name).is_some() || matches!(name.to_ascii_uppercase().as_str(),
+        "MOVE"|"MOVI"|"MOVB"|"MOVX"|"MOVY"|"INC"|"DEC"|"NOP"|"RL"|"RR"|"SLL"|"SRL"|"SLA"|"SRA"|
+        "CALL"|"CALLR"|"CALLA"|"CALLI"|"JMP"|"JUMP"|"RETS"|"RETI"|"TRAP"|"BTST"|"ANDN"|"CLR"|"NOT"|
+        "DSJ"|"DSJS"|"DSJEQ"|"DSJNE"|"MMTM"|"MMFM"|"EXGPC"|"FILL"|"PIXT")
+}
+
 /// A complete branch/call target, retaining an explicit hash-local namespace.
 fn parse_branch_target(input: &str) -> IResult<&str, &str> {
-    let (rest, target) = recognize(tuple((opt(char('#')), take_while1(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.'))))(input)?;
+    let (rest, target) = recognize(tuple((opt(char('#')), take_while1(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '$'))))(input)?;
     if !rest.trim().is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(rest, nom::error::ErrorKind::Eof)));
     }
@@ -561,6 +534,15 @@ pub fn parse_jr(input: &str) -> IResult<&str, ParsedInstruction> {
 }
 pub fn branch_condition(mnemonic: &str) -> Option<(bool, u8)> {
     let upper = mnemonic.to_ascii_uppercase();
+    let xy = match upper.as_str() {
+        "JRXZ"|"JRXEQ" => Some(0xE), "JRXNZ"|"JRXNE" => Some(0xF),
+        "JRXN"|"JRXLT" => Some(0xC), "JRXNN"|"JRXGE" => Some(0xD),
+        "JRXLE" => Some(0x4), "JRXGT" => Some(0x5),
+        "JRYZ"|"JRYEQ" => Some(0xA), "JRYNZ"|"JRYNE" => Some(0xB),
+        "JRYN"|"JRYLT" => Some(0x8), "JRYNN"|"JRYGE" => Some(0x9),
+        "JRYLE" => Some(0x2), "JRYGT" => Some(0x3), _ => None,
+    };
+    if let Some(condition) = xy { return Some((false,condition)); }
     if !upper.starts_with("JR") && !upper.starts_with("JA") { return None; }
     let condition = match &upper[2..] {
         "UC" | "" => 0x0, "P" => 0x1, "LS" => 0x2, "HI" => 0x3,
@@ -768,52 +750,112 @@ pub fn parse_equ(input: &str) -> IResult<&str, ParsedInstruction> {
 }
 
 // Enhanced numeric & coordinate literal parser
-pub fn evaluate_arithmetic(expression: &str, lookup: impl Fn(&str) -> i32) -> i32 {
-    fn expr(input: &[u8], pos: &mut usize, min_precedence: u8, lookup: &impl Fn(&str) -> i32) -> i32 {
+// TI tools guide Table 4-1: bitwise operations share addition's precedence;
+// shifts share multiplication's precedence. Unary operations bind first.
+pub fn evaluate_arithmetic_checked(expression: &str, lookup: impl Fn(&str) -> i32) -> Result<i32, String> {
+    fn space(input: &[u8], pos: &mut usize) {
         while input.get(*pos).is_some_and(u8::is_ascii_whitespace) { *pos += 1; }
+    }
+    fn expr(input: &[u8], pos: &mut usize, min: u8, lookup: &impl Fn(&str) -> i32) -> Result<i32, String> {
+        space(input,pos);
         let mut value = match input.get(*pos).copied() {
             Some(b'(') => {
                 *pos += 1;
-                let value = expr(input, pos, 0, lookup);
-                if input.get(*pos) == Some(&b')') { *pos += 1; }
-                value
+                let v = expr(input,pos,0,lookup)?; space(input,pos);
+                if input.get(*pos) != Some(&b')') { return Err("missing closing parenthesis".into()); }
+                *pos += 1; v
+            }
+            Some(b'[') => {
+                *pos += 1;
+                let high = expr(input,pos,0,lookup)?; space(input,pos);
+                if input.get(*pos) != Some(&b',') { return Err("missing coordinate comma".into()); }
+                *pos += 1;
+                let low = expr(input,pos,0,lookup)?; space(input,pos);
+                if input.get(*pos) != Some(&b']') { return Err("missing coordinate bracket".into()); }
+                *pos += 1;
+                ((high & 0xffff) << 16) | (low & 0xffff)
+            }
+            Some(b'\'') => {
+                *pos += 1;
+                let c = *input.get(*pos).ok_or("missing character")?;
+                *pos += 1;
+                if input.get(*pos) != Some(&b'\'') { return Err("expected one quoted character".into()); }
+                *pos += 1; c as i32
             }
             Some(op @ (b'+' | b'-' | b'~')) => {
                 *pos += 1;
-                let value = expr(input, pos, 5, lookup);
-                match op { b'-' => value.wrapping_neg(), b'~' => !value, _ => value }
+                let v = expr(input,pos,3,lookup)?;
+                match op { b'-' => v.wrapping_neg(), b'~' => !v, _ => v }
             }
             _ => {
                 let start = *pos;
-                while input.get(*pos).is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'$' | b'#')) { *pos += 1; }
-                let token = std::str::from_utf8(&input[start..*pos]).unwrap_or("");
+                while input.get(*pos).is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c,b'_'|b'$'|b'#'|b'.')) { *pos += 1; }
+                if start == *pos { return Err("expected expression operand".into()); }
+                let token = std::str::from_utf8(&input[start..*pos]).map_err(|_| "invalid expression")?;
                 let upper = token.to_ascii_uppercase();
-                if let Some(hex) = upper.strip_prefix('$').or_else(|| upper.strip_prefix("0X")) {
-                    u32::from_str_radix(hex, 16).unwrap_or(0) as i32
-                } else if let Some(hex) = upper.strip_suffix('H').filter(|s| !s.is_empty() && s.bytes().all(|c| c.is_ascii_hexdigit())) {
-                    u32::from_str_radix(hex, 16).unwrap_or(0) as i32
-                } else if let Some(bits) = upper.strip_suffix('B').filter(|s| !s.is_empty() && s.bytes().all(|c| matches!(c, b'0' | b'1'))) {
-                    u32::from_str_radix(bits, 2).unwrap_or(0) as i32
+                if let Some(hex) = upper.strip_prefix('$').filter(|v| !v.is_empty() && v.bytes().all(|c| c.is_ascii_hexdigit()))
+                    .or_else(|| upper.strip_prefix("0X")) {
+                    u32::from_str_radix(hex,16).map_err(|_| "invalid hexadecimal constant")? as i32
+                } else if let Some(hex) = upper.strip_suffix('H').filter(|v| !v.is_empty() && v.bytes().all(|c| c.is_ascii_hexdigit())) {
+                    u32::from_str_radix(hex,16).map_err(|_| "invalid hexadecimal constant")? as i32
+                } else if let Some(bits) = upper.strip_suffix('B').filter(|v| !v.is_empty() && v.bytes().all(|c| matches!(c,b'0'|b'1'))) {
+                    u32::from_str_radix(bits,2).map_err(|_| "invalid binary constant")? as i32
                 } else { token.parse::<u32>().map(|v| v as i32).unwrap_or_else(|_| lookup(token)) }
             }
         };
         loop {
-            while input.get(*pos).is_some_and(u8::is_ascii_whitespace) { *pos += 1; }
-            let Some(op) = input.get(*pos).copied() else { break; };
-            let precedence = match op { b'|' => 0, b'^' => 1, b'&' => 2, b'+' | b'-' => 3, b'*' | b'/' | b'%' => 4, _ => break };
-            if precedence < min_precedence { break; }
-            *pos += 1;
-            let rhs = expr(input, pos, precedence + 1, lookup);
+            space(input,pos);
+            let remaining = &input[*pos..];
+            let (op,len,precedence) = if remaining.starts_with(b"<<") { (b'<',2,2) }
+                else if remaining.starts_with(b">>") { (b'>',2,2) }
+                else { match remaining.first().copied() {
+                    Some(op @ (b'+'|b'-'|b'|'|b'&'|b'^')) => (op,1,1),
+                    Some(op @ (b'*'|b'/'|b'%')) => (op,1,2),
+                    _ => break,
+                }};
+            if precedence < min { break; }
+            *pos += len;
+            let rhs = expr(input,pos,precedence+1,lookup)?;
             value = match op {
                 b'+' => value.wrapping_add(rhs), b'-' => value.wrapping_sub(rhs), b'*' => value.wrapping_mul(rhs),
                 b'/' => if rhs == 0 { 0 } else { value.wrapping_div(rhs) },
                 b'%' => if rhs == 0 { 0 } else { value.wrapping_rem(rhs) },
-                b'&' => value & rhs, b'^' => value ^ rhs, b'|' => value | rhs, _ => unreachable!(),
+                b'|' => value|rhs, b'&' => value&rhs, b'^' => value^rhs,
+                b'<' => value.wrapping_shl(rhs as u32), b'>' => value.wrapping_shr(rhs as u32), _ => unreachable!(),
             };
         }
-        value
+        Ok(value)
     }
-    expr(expression.trim().as_bytes(), &mut 0, 0, &lookup)
+    let mut pos = 0;
+    let input = expression.trim().as_bytes();
+    let value = expr(input,&mut pos,0,&lookup)?;
+    if pos != input.len() { return Err("trailing expression text".into()); }
+    Ok(value)
+}
+
+pub fn evaluate_arithmetic(expression: &str, lookup: impl Fn(&str) -> i32) -> i32 {
+    evaluate_arithmetic_checked(expression,lookup).unwrap_or(0)
+}
+
+pub fn parse_expression_operand(input: &str) -> IResult<&str, Operand> {
+    let mut depth = 0usize;
+    let mut quote = false;
+    let mut end = input.len();
+    for (index,ch) in input.char_indices() {
+        if ch == '\'' { quote = !quote; }
+        if quote { continue; }
+        match ch {
+            '('|'[' => depth += 1,
+            ')'|']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => { end = index; break; },
+            _ => {},
+        }
+    }
+    let token = input[..end].trim().trim_start_matches('#').trim();
+    let seen = std::cell::Cell::new(false);
+    let value = evaluate_arithmetic_checked(token, |_| {seen.set(true);0})
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input,nom::error::ErrorKind::Tag)))?;
+    Ok((&input[end..], if seen.get() {Operand::Symbol(token.to_string())} else {Operand::Immediate(value)}))
 }
 
 pub fn parse_expression_value(directive: &str, symbols: &std::collections::HashMap<String, u32>) -> i32 {
@@ -842,27 +884,7 @@ pub fn parse_expression_value(directive: &str, symbols: &std::collections::HashM
 }
 
 fn parse_number_literal(s: &str) -> i32 {
-    let s = s.trim();
-
-    // Handle coordinate pairs like [0, -32]
-    if s.starts_with('[') && s.ends_with(']') {
-        let inner = &s[1..s.len() - 1];
-        let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
-        if parts.len() == 2 {
-            let y = parse_number_literal(parts[0]);
-            let x = parse_number_literal(parts[1]);
-            // Pack 16-bit Y (upper) and 16-bit X (lower) into a 32-bit value
-            return ((y & 0xFFFF) << 16) | (x & 0xFFFF);
-        }
-    }
-
-    if let Some(hex_str) = s.strip_prefix('$') {
-        i32::from_str_radix(hex_str, 16).unwrap_or(0)
-    } else if let Some(hex_str) = s.strip_prefix("0x") {
-        i32::from_str_radix(hex_str, 16).unwrap_or(0)
-    } else {
-        s.parse::<i32>().unwrap_or(0)
-    }
+    evaluate_arithmetic(s, |_| 0)
 }
 
 // Parse CMP instruction: CMP src, dst
@@ -1362,57 +1384,7 @@ pub fn parse_movb(input: &str) -> IResult<&str, ParsedInstruction> {
 }
 
 pub fn parse_legacy_immediate(input: &str) -> IResult<&str, Operand> {
-    let (input, _) = opt(char('#'))(input)?;
-
-    if input.starts_with('[') {
-        if let Some(end) = input.find(']') {
-            let coordinate = &input[..=end];
-            return Ok((
-                &input[end + 1..],
-                Operand::Immediate(parse_number_literal(coordinate)),
-            ));
-        }
-    }
-
-    let (input, token) = take_while1(|c: char| {
-        c.is_alphanumeric()
-            || c == '_'
-            || c == '$'
-            || c == '-'
-            || c == '/'
-            || c == '*'
-            || c == '('
-            || c == ')'
-            || c == '|'
-            || c == '&'
-            || c == '+'
-            || c == '~'
-            || c == ' '
-            || c == '\t'
-            || c == 'h'
-            || c == 'H'
-    })(input)?;
-
-    let token_trimmed = token.trim();
-    let operand = if let Ok(n) = token_trimmed.parse::<i32>() {
-        Operand::Immediate(n)
-    } else if let Some(hex) = token_trimmed.strip_prefix('$') {
-        Operand::Immediate(i32::from_str_radix(hex, 16).unwrap_or(0))
-    } else if let Some(hex) = token_trimmed
-        .strip_prefix("0x")
-        .or_else(|| token_trimmed.strip_prefix("0X"))
-    {
-        Operand::Immediate(i32::from_str_radix(hex, 16).unwrap_or(0))
-    } else if let Some(hex) = token_trimmed
-        .strip_suffix('h')
-        .or_else(|| token_trimmed.strip_suffix('H'))
-    {
-        Operand::Immediate(i32::from_str_radix(hex, 16).unwrap_or(0))
-    } else {
-        Operand::Symbol(token_trimmed.to_string())
-    };
-
-    Ok((input, operand))
+    parse_expression_operand(input)
 }
 
 /// Parse ORI instruction.
