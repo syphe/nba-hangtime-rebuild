@@ -221,11 +221,21 @@ def main():
                 continue
 
             previous_kind = symbol_kinds.get(name)
+            if section == "" and address == 0 and previous_kind == "section":
+                continue
             if previous_kind == "absolute" and section in ("text", "data"):
+                continue
+            if previous_kind == "external" and section in ("text", "data"):
+                symbols[name] = address
+                symbol_kinds[name] = "section"
                 continue
             if previous_kind is None or section in ("text", "data"):
                 symbols[name] = address
-                symbol_kinds[name] = "absolute" if section == "" else "section"
+                symbol_kinds[name] = (
+                    "external" if section == "" and address == 0
+                    else "absolute" if section == ""
+                    else "section"
+                )
             elif section == "" and previous_kind == "section":
                 symbols[name] = address
                 symbol_kinds[name] = "absolute"
@@ -262,6 +272,11 @@ def main():
                 value = section_addresses[section_name_value] + symbol.get("section_offset", 0) * 8
             elif not symbol.get("section") and symbol.get("kind") == "symbol":
                 value = symbol.get("address", 0)
+                # .ref/.global declarations are represented as zero-valued,
+                # sectionless symbols. Keep an already-defined global target
+                # instead of letting this object's unresolved placeholder hide it.
+                if value == 0 and symbol["name"].lower() in symbols:
+                    continue
             else:
                 continue
             object_symbols[symbol["name"].lower()] = value

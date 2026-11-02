@@ -460,6 +460,7 @@ pub fn parse_line(input: &str) -> IResult<&str, ParsedInstruction> {
             parse_jr,
             parse_relative_conditional,
             parse_call,
+            parse_jauc,
             parse_jahs,
             parse_jeq,
             parse_jne,
@@ -1419,6 +1420,14 @@ pub fn parse_callr(input: &str) -> IResult<&str, ParsedInstruction> {
             label: label.to_string(),
         },
     ))
+}
+
+/// Parse JAUC (jump absolute, unconditional) as an absolute condition-code jump.
+pub fn parse_jauc(input: &str) -> IResult<&str, ParsedInstruction> {
+    let (input, _) = tag_no_case("JAUC")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, target) = parse_identifier(input)?;
+    Ok((input, ParsedInstruction::Jacc { condition: 0, target: target.to_string() }))
 }
 
 /// Parse MOVK instruction (e.g., "MOVK INAMODE, A0")

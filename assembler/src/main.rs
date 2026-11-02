@@ -466,14 +466,6 @@ impl Assembler {
         let mut idx = 0;
         let mut conditionals: Vec<ConditionalFrame> = Vec::new();
 
-        self.macro_table
-            .entry("JAUC".to_string())
-            .or_insert(MacroTemplate {
-                name: "JAUC".to_string(),
-                params: vec!["P1".to_string()],
-                body: vec!["jmp\t:P1:".to_string()],
-            });
-
         while idx < line_queue.len() {
             let raw_line = line_queue[idx].clone();
             idx += 1;
@@ -749,6 +741,7 @@ impl Assembler {
                             | "CALLA"
                             | "CALLR"
                             | "JSRP"
+                            | "JAUC"
                             | "CALLI"
                             | "BTST"
                             | "CLR"
@@ -843,6 +836,7 @@ impl Assembler {
                                     | "CALLA"
                                     | "CALLR"
                                     | "JSRP"
+                                    | "JAUC"
                                     | "CALLI"
                                     | "BTST"
                                     | "CLR"
