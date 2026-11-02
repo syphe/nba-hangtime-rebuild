@@ -82,6 +82,24 @@ struct ObjectFixup {
     kind: String,
 }
 
+fn is_symbolic_expression(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty()
+        || value.starts_with('$')
+        || value.starts_with("0x")
+        || value.starts_with("0X")
+        || value.parse::<i64>().is_ok()
+    {
+        return false;
+    }
+    if let Some(hex) = value.strip_suffix('h').or_else(|| value.strip_suffix('H')) {
+        if !hex.is_empty() && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    value.chars().any(|ch| ch.is_ascii_alphabetic() || ch == '_' || ch == '#')
+}
+
 #[derive(Serialize, Clone)]
 struct ObjectSection {
     name: String,
@@ -221,12 +239,7 @@ impl ObjectFile {
             if let Instruction::Directive { name, args } = &instruction {
                 if name.eq_ignore_ascii_case(".WORD") {
                     for (index, arg) in args.iter().enumerate() {
-                        if !arg.trim().is_empty()
-                            && !arg.starts_with('$')
-                            && !arg.starts_with("0x")
-                            && arg.parse::<i32>().is_err()
-                            && arg.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '#'))
-                        {
+                        if is_symbolic_expression(arg) {
                             fixups.push(ObjectFixup {
                                 offset: section_offsets.get(&current_section).copied().unwrap_or(0)
                                     + index as u32 * 2,

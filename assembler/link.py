@@ -7,7 +7,6 @@ import json
 import ast
 import re
 import struct
-from collections import Counter
 from pathlib import Path
 
 ROM_BASE = 0xFF800000
@@ -156,7 +155,6 @@ def main():
 
     unresolved_fixups = []
     implicit_local_labels = {"c", "e", "z"}
-    unsupported_relative = Counter()
     short_relative_count = 0
     # Apply the short relative fixups emitted in object format.
     for path, obj, addresses in placements:
@@ -188,10 +186,10 @@ def main():
                 continue
             relative = (target - (source + 2)) // 2
             if relative < -128 or relative > 127:
-                unsupported_relative[
-                    "negative" if relative < 0 else "positive"
-                ] += 1
-                continue
+                raise ValueError(
+                    f"{path}: relative relocation {fixup['symbol']!r} at 0x{source:X} "
+                    f"is out of range ({relative} words; expected -128..127)"
+                )
             short_relative_count += 1
             start = source - ROM_BASE
             if start < 0 or start + 2 > len(rom):
@@ -202,13 +200,7 @@ def main():
         unique = sorted({f"{path.name}: {symbol}" for path, symbol in unresolved_fixups})
         raise ValueError("Unresolved relocations:\n  " + "\n  ".join(unique))
 
-    if unsupported_relative:
-        print(
-            "Relocation classification: "
-            f"{short_relative_count} short relative; "
-            f"{unsupported_relative['positive']} positive out-of-range; "
-            f"{unsupported_relative['negative']} negative out-of-range"
-        )
+    print(f"Relocation classification: {short_relative_count} short relative")
 
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
