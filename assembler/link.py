@@ -4,6 +4,8 @@
 import argparse
 import base64
 import json
+import ast
+import re
 import struct
 from collections import Counter
 from pathlib import Path
@@ -20,6 +22,53 @@ def section_name(name: str) -> str:
     if lowered == "data" or lowered == ".data":
         return "data"
     return lowered
+
+
+def resolve_expression(expression: str, symbols: dict[str, int]):
+    text = expression.strip().replace("$", "0x")
+    exact_symbol = symbols.get(text.lower())
+    if exact_symbol is not None:
+        return exact_symbol
+
+    def legacy_hex(match):
+        token = match.group(0)
+        return str(int(token[:-1], 16))
+
+    text = re.sub(r"(?<![A-Za-z0-9_])[0-9A-Fa-f]+H", legacy_hex, text)
+
+    symbol_names = sorted(symbols, key=len, reverse=True)
+    if symbol_names:
+        symbol_pattern = re.compile(
+            r"(?<![A-Za-z0-9_])(" + "|".join(re.escape(name) for name in symbol_names) + r")(?=$|[^A-Za-z0-9_])",
+            re.IGNORECASE,
+        )
+        text = symbol_pattern.sub(lambda match: str(symbols[match.group(1).lower()]), text)
+    text = text.replace("|", " | ")
+
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError as error:
+        raise ValueError(f"unsupported relocation expression {expression!r}") from error
+
+    def evaluate(node):
+        if isinstance(node, ast.Expression):
+            return evaluate(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return int(node.value)
+        if isinstance(node, ast.BinOp):
+            left, right = evaluate(node.left), evaluate(node.right)
+            if isinstance(node.op, ast.Add): return left + right
+            if isinstance(node.op, ast.Sub): return left - right
+            if isinstance(node.op, ast.Mult): return left * right
+            if isinstance(node.op, ast.Div): return int(left / right)
+            if isinstance(node.op, ast.FloorDiv): return left // right
+            if isinstance(node.op, ast.BitOr): return left | right
+            if isinstance(node.op, ast.BitAnd): return left & right
+            if isinstance(node.op, ast.LShift): return left << right
+            if isinstance(node.op, ast.RShift): return left >> right
+        raise ValueError(f"unsupported relocation expression {expression!r}")
+
+    return evaluate(tree)
 
 
 def load_objects(paths: list[Path]):
@@ -41,6 +90,7 @@ def main():
     objects = load_objects(args.objects)
     text_cursor = ROM_BASE
     symbols = {}
+    symbol_kinds = {}
     placements = []
 
     text_size = sum(
@@ -74,14 +124,18 @@ def main():
                 address = section_addresses[section] + symbol.get("section_offset", 0)
             elif symbol.get("section") == "" and symbol.get("kind") == "symbol":
                 address = symbol.get("address", 0)
-                if address == 0:
-                    continue
             if address is None:
                 continue
 
-            previous = symbols.get(name)
-            if previous is None or section in ("text", "data"):
+            previous_kind = symbol_kinds.get(name)
+            if previous_kind == "absolute" and section in ("text", "data"):
+                continue
+            if previous_kind is None or section in ("text", "data"):
                 symbols[name] = address
+                symbol_kinds[name] = "absolute" if section == "" else "section"
+            elif section == "" and previous_kind == "section":
+                symbols[name] = address
+                symbol_kinds[name] = "absolute"
 
     rom = bytearray([FILL]) * ROM_LENGTH
 
@@ -111,12 +165,13 @@ def main():
             section = section_name(fixup["section"])
             if section not in ("text", "data") or section not in section_addresses:
                 continue
-            if fixup["symbol"].lower() not in symbols:
+            try:
+                target = resolve_expression(fixup["symbol"], symbols)
+            except ValueError:
                 if fixup["symbol"].lower() not in implicit_local_labels:
                     unresolved_fixups.append((path, fixup["symbol"]))
                 continue
             source = section_addresses[section] + fixup["offset"]
-            target = symbols[fixup["symbol"].lower()]
             if fixup.get("kind") in ("absolute16", "absolute32"):
                 width = 2 if fixup["kind"] == "absolute16" else 4
                 start = source - ROM_BASE
@@ -125,6 +180,10 @@ def main():
                 if width == 2:
                     rom[start:start + 2] = struct.pack("<H", target & 0xFFFF)
                 else:
+                    if target < 0 or target > 0xFFFFFFFF:
+                        raise ValueError(
+                            f"{path}: absolute fixup {fixup['symbol']!r} resolved to out-of-range address 0x{target:X}"
+                        )
                     rom[start:start + 4] = struct.pack("<I", target)
                 continue
             relative = (target - (source + 2)) // 2

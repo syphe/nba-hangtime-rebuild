@@ -384,6 +384,9 @@ impl Assembler {
     /// Pass 1: Parse AST via nom, collect labels, and assign memory locations
     pub fn pass_one(&mut self, lines: &[&str]) -> Result<Vec<Instruction>, AsmError> {
         let mut ast = Vec::new();
+        // Keep the source expressions as well as the parser's provisional numeric
+        // value.  Equates can refer to labels and equates declared later in the file.
+        let mut pending_equates: Vec<(String, String)> = Vec::new();
         let mut current_macro: Option<MacroTemplate> = None;
         let mut macro_expansion_count = 0usize;
 
@@ -497,21 +500,38 @@ impl Assembler {
             let line_num = idx; // approximate
 
             // 4. Check for .equ Equates FIRST (before labels)
-            if upper_trimmed.contains(".EQU")
-                || upper_trimmed
-                    .split_whitespace()
-                    .nth(1)
-                    .is_some_and(|word| word.eq_ignore_ascii_case("EQU"))
+            let constant_parts: Vec<&str> = upper_trimmed.split_whitespace().collect();
+            let is_set_constant = constant_parts.len() >= 3
+                && constant_parts[1].eq_ignore_ascii_case("SET") ||
+                constant_parts.len() >= 3 && constant_parts[1].eq_ignore_ascii_case(".SET") ||
+                constant_parts.len() >= 2 && constant_parts.first().is_some_and(|word| word.eq_ignore_ascii_case(".SET"));
+            let is_equ_constant = upper_trimmed.contains(".EQU")
+                || (constant_parts.len() >= 3 && constant_parts[1].eq_ignore_ascii_case("EQU"));
+            if is_set_constant || is_equ_constant
             {
-                match parser::parse_equ(trimmed) {
-                    Ok((_, Instruction::Equ { name, value })) => {
+                let parsed = if is_set_constant
+                {
+                    parser::parse_set(trimmed).map(|(_, instruction)| instruction)
+                } else {
+                    parser::parse_equ(trimmed).map(|(_, instruction)| instruction)
+                };
+                match parsed {
+                    Ok(Instruction::Equ { name, value }) => {
                         self.symbol_table.insert(name.clone(), value as u32);
+                        let words: Vec<&str> = trimmed.split_whitespace().collect();
+                        if words.len() >= 3 {
+                            let expression = words[2..].join(" ");
+                            pending_equates.push((
+                                name.clone(),
+                                expression.split(';').next().unwrap_or("").trim().to_string(),
+                            ));
+                        }
                         ast.push(Instruction::Equ { name, value });
                         continue;
                     }
                     _ => {
                         return Err(AsmError::UnknownOpcode(
-                            format!("Invalid .equ directive syntax: {}", trimmed),
+                            format!("Invalid constant directive syntax: {}", trimmed),
                             line_num,
                         ));
                     }
@@ -1000,6 +1020,16 @@ impl Assembler {
             }
         }
 
+        // Re-evaluate after labels have been assigned. A few rounds allow chains
+        // such as A EQU B+1 / B EQU TARGET to settle when declarations are forward.
+        for _ in 0..=pending_equates.len() {
+            let values: Vec<(String, u32)> = pending_equates.iter().map(|(name, expr)| {
+                let symbols: HashMap<String, u32> = self.symbol_table.symbols.iter()
+                    .map(|(key, value)| (key.to_ascii_uppercase(), *value)).collect();
+                (name.clone(), parser::parse_expression_value(&format!(".equ {} {}", name, expr), &symbols) as u32)
+            }).collect();
+            for (name, value) in values { self.symbol_table.insert(name, value); }
+        }
         Ok(ast)
     }
 

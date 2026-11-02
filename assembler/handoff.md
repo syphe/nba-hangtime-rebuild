@@ -58,16 +58,20 @@ A modern, native Rust assembler designed for the TMS34010 arcade graphics proces
 - Relocation classification is implemented in `link.py`: a clean link applies short relative relocations and reports out-of-range branches separately. `CALLA` targets now emit `absolute32` fixups (4,139 across the object set) and the linker writes them as 32-bit operands.
 - Section allocation directives such as `.BSS name,size` are no longer mistaken for section switches, correcting `.text` symbol metadata and eliminating cross-module false addresses.
 - The earlier standalone COFF-extraction experiment was removed because its section-offset assumptions were not reliable; legacy `BB.OUT` remains a reference only.
+- Legacy `.set` directives and `.set`/`.equ` numeric constants are now recognized without treating inline instruction operands as constants; legacy `400h` values are supported.
+- The Python linker now recognizes compound relocation expressions and preserves absolute constants separately from section symbols. Remaining expression work is to resolve symbolic `.equ` chains (for example `TM_X+189` and `ADJ_ULY-20`) rather than recording them as zero.
+- Recent full-object validation reached linker expression diagnosis successfully; final clean rebuild/link validation remains in progress after expression-symbol fixes.
 
 ## 6. Next Steps
 
 The next logical implementation step is relocation correctness in the modern program linker:
 
-1. Extend PC-relative branch support for out-of-range relocations; first replace the current encoder clamp with explicit known-branch expansion and add equivalent linker fixups for the expanded instruction sequence.
-2. Add explicit relocation kinds for address fixups emitted by `MOVI` and `.WORD` operands, then apply them in `link.py` (many may share the `absolute32` encoding).
-3. Reconcile the experimental flat layout with `SRC/BB.CMD` and legacy section addresses/sizes.
-4. Generate `BB.OUT` in a format compatible with the legacy ROM conversion tools.
-5. Add native ROM conversion/splitting to `assembler/build.ps1` and compare output with the DOSBox reference artifacts byte-for-byte.
-6. Keep graphics replacement and GSP changes separate until the program-ROM linker passes byte comparison.
+1. Resolve symbolic `.equ` and `.set` expressions in the Rust assembler (including forward references), preserving numeric values for the linker instead of emitting zero-valued constants.
+2. Extend PC-relative branch support for out-of-range relocations; first replace the current encoder clamp with explicit known-branch expansion and add equivalent linker fixups for the expanded instruction sequence.
+3. Add explicit relocation kinds for address fixups emitted by `MOVI` and `.WORD` operands, then apply them in `link.py` (many may share the `absolute32` encoding).
+4. Reconcile the experimental flat layout with `SRC/BB.CMD` and legacy section addresses/sizes.
+5. Generate `BB.OUT` in a format compatible with the legacy ROM conversion tools.
+6. Add native ROM conversion/splitting to `assembler/build.ps1` and compare output with the DOSBox reference artifacts byte-for-byte.
+7. Keep graphics replacement and GSP changes separate until the program-ROM linker passes byte comparison.
 
 Graphics replacement remains separate and must not be included in the linker implementation commit.

@@ -715,6 +715,47 @@ pub fn parse_equ(input: &str) -> IResult<&str, ParsedInstruction> {
 }
 
 // Enhanced numeric & coordinate literal parser
+pub fn parse_expression_value(directive: &str, symbols: &std::collections::HashMap<String, u32>) -> i32 {
+    let upper = directive.to_ascii_uppercase();
+    let marker = upper.find(".EQU ").or_else(|| upper.find(" EQU ")).or_else(|| upper.find(".SET ")).or_else(|| upper.find(" SET "));
+    let expression = marker.map(|index| {
+        let tail = &upper[index..];
+        tail.split_once(' ').map(|(_, value)| value).unwrap_or("")
+    }).unwrap_or("");
+
+    fn value_expr(input: &str, symbols: &std::collections::HashMap<String, u32>, position: &mut usize) -> i32 {
+        fn primary(input: &str, symbols: &std::collections::HashMap<String, u32>, position: &mut usize) -> i32 {
+            while input.as_bytes().get(*position).is_some_and(|c| c.is_ascii_whitespace()) { *position += 1; }
+            if input.as_bytes().get(*position) == Some(&b'(') { *position += 1; let v = value_expr(input, symbols, position); *position += 1; return v; }
+            let start = *position;
+            while input.as_bytes().get(*position).is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'$' | b'#')) { *position += 1; }
+            let token = &input[start..*position];
+            if token.is_empty() { return 0; }
+            if let Some(hex) = token.strip_prefix('$') {
+                i32::from_str_radix(hex, 16).unwrap_or(0)
+            } else if let Some(hex) = token.strip_prefix("0x") {
+                i32::from_str_radix(hex, 16).unwrap_or(0)
+            } else if token.len() > 1 && token.ends_with(|c: char| c == 'H' || c == 'h') {
+                i32::from_str_radix(&token[..token.len() - 1], 16).unwrap_or(0)
+            } else if let Ok(number) = token.parse::<i32>() {
+                number
+            } else {
+                symbols.get(&token.to_ascii_uppercase()).copied().unwrap_or(0) as i32
+            }
+        }
+        let mut value = primary(input, symbols, position);
+        loop {
+            while input.as_bytes().get(*position).is_some_and(|c| c.is_ascii_whitespace()) { *position += 1; }
+            let op = input.as_bytes().get(*position).copied();
+            match op { Some(b'*') => { *position += 1; value *= primary(input, symbols, position); }, Some(b'/') => { *position += 1; value /= primary(input, symbols, position).max(1); }, Some(b'+') | Some(b'-') => { let op=input.as_bytes()[*position] as char; *position += 1; let rhs=primary(input,symbols,position); value += if op=='+' {rhs} else {-rhs}; while input.as_bytes().get(*position).is_some_and(|c| c.is_ascii_whitespace()) {*position +=1;} continue; }, _ => break }
+        }
+        value
+    }
+
+    let mut position = 0;
+    value_expr(expression, symbols, &mut position)
+}
+
 fn parse_number_literal(s: &str) -> i32 {
     let s = s.trim();
 
@@ -787,7 +828,7 @@ pub fn parse_set(input: &str) -> IResult<&str, ParsedInstruction> {
             preceded(space0, tag_no_case(".set")),
             preceded(
                 space1,
-                take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '$' || c == '-'),
+                take_while1(|c: char| c.is_alphanumeric() || matches!(c, '_' | '$' | '-' | '+' | '*' | '/' | '(' | ')' | '[' | ']' | ',' | '|')),
             ),
         )),
         |(name, _, val_str): (&str, &str, &str)| {
@@ -795,6 +836,8 @@ pub fn parse_set(input: &str) -> IResult<&str, ParsedInstruction> {
                 n
             } else if let Some(hex) = val_str.strip_prefix('$') {
                 i32::from_str_radix(hex, 16).unwrap_or(0)
+            } else if val_str.to_ascii_uppercase().ends_with('H') {
+                i32::from_str_radix(&val_str[..val_str.len() - 1], 16).unwrap_or(0)
             } else {
                 0
             };
