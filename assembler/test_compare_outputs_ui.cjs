@@ -9,7 +9,8 @@ const document = {
   querySelectorAll: () => [],
 };
 const context = vm.createContext({ document });
-vm.runInContext(page.match(/<script>([\s\S]*)<\/script>/)[1], context);
+const script = page.match(/<script>([\s\S]*)<\/script>/)[1];
+vm.runInContext(script, context);
 assert.match(nodes['#count'].textContent, /^153 \/ 153/);
 assert.equal((nodes['#modules'].innerHTML.match(/<tr>/g) || []).length, 154);
 nodes['#search'].value = 'PAL';
@@ -25,4 +26,16 @@ nodes['#search'].value = '';
 nodes['#different'].checked = false;
 vm.runInContext("key='delta';direction=-1;rows()", context);
 assert.match(nodes['#modules'].innerHTML, /<tr><td>ATTRACT<\/td><td>\.data<\/td>/);
-console.log('PASS: report renders 153 contributions; search, mismatch filtering, and sorting work.');
+const fixture = vm.runInContext('JSON.parse(JSON.stringify(R))', context);
+fixture.coverage = [{module:'DEMO',omitted:[{mnemonic:'SEXT',count:2},{mnemonic:'NEG',count:1}]},
+                    {module:'OLD',omitted:null}];
+const coverageNodes = {};
+const coverageDocument = { querySelector: key => coverageNodes[key] ||= {innerHTML:'',value:'',checked:false},
+                           querySelectorAll: () => [] };
+const fixtureScript = script.replace(/^const R=.*;\r?\n/, 'const R='+JSON.stringify(fixture)+';\n');
+assert.notEqual(fixtureScript, script);
+vm.runInNewContext(fixtureScript, {document:coverageDocument});
+assert.match(coverageNodes['#coverage'].innerHTML, /3 omitted instruction occurrences across 1 modules/);
+assert.match(coverageNodes['#coverage'].innerHTML, /unavailable for 1 modules/);
+assert.match(coverageNodes['#coverage'].innerHTML, /SEXT \(2\), NEG \(1\)/);
+console.log('PASS: report renders 153 contributions; search, filtering, sorting, and coverage counts work.');

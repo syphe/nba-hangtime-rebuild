@@ -95,6 +95,9 @@ struct Args {
     /// Write a relocatable JSON object containing symbols and code (for linker development).
     #[arg(long)]
     object_format: bool,
+    /// Reject instruction mnemonics that currently emit no code.
+    #[arg(long)]
+    deny_omitted_instructions: bool,
 
     /// Verbose output showing passes and symbol table
     #[arg(short, long)]
@@ -185,6 +188,25 @@ struct ObjectFile {
     bss_size_bits: u32,
     symbols: Vec<ObjectSymbol>,
     fixups: Vec<ObjectFixup>,
+    omitted_instructions: Vec<OmittedInstruction>,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+struct OmittedInstruction {
+    mnemonic: String,
+    count: usize,
+}
+
+fn omitted_instructions(ast: &[Instruction]) -> Vec<OmittedInstruction> {
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for instruction in ast {
+        if let Instruction::Directive { name, .. } = instruction {
+            if !name.starts_with('.') && !matches!(name.to_ascii_uppercase().as_str(), "MMTM" | "MMFM") {
+                *counts.entry(name.to_ascii_uppercase()).or_default() += 1;
+            }
+        }
+    }
+    counts.into_iter().map(|(mnemonic, count)| OmittedInstruction { mnemonic, count }).collect()
 }
 
 impl ObjectFile {
@@ -416,6 +438,7 @@ impl ObjectFile {
             bss_size_bits,
             symbols,
             fixups,
+            omitted_instructions: omitted_instructions(ast),
         }
     }
 }
@@ -476,11 +499,63 @@ pub struct Assembler {
     current_address: u32,
     assignment_aliases: HashMap<String, String>,
     object_format: bool,
+    register_aliases: HashMap<String, String>,
 }
 
 #[cfg(test)]
 mod loop_expression_tests {
     use super::*;
+
+    #[test]
+    fn elseif_chooses_only_first_match_and_respects_inactive_parents() {
+        let source = ".if 0\n.word 99\n.elseif 1\n.word 1\n.elseif 1\n.word 99\n.else\n.word 99\n.endif\n.if 0\n.if 0\n.elseif 1\n.word 99\n.else\n.word 99\n.endif\n.endif\n.if 0\n.elseif 0\n.else\n.word 2\n.endif";
+        let mut assembler = Assembler::new();
+        let ast = assembler.pass_one(&source.lines().collect::<Vec<_>>()).unwrap();
+        assert_eq!(assembler.pass_two(&ast).unwrap(), vec![1,0,2,0]);
+        for source in [".else", ".elseif 1", ".endif", ".if 1", ".if 1\n.else\n.else\n.endif", ".if 1\n.else\n.elseif 1\n.endif"] {
+            assert!(Assembler::new().pass_one(&source.lines().collect::<Vec<_>>()).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn production_stack_macros_select_all_registers() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../SRC/MACROS.HDR");
+        let header = load_source_file(&path).unwrap().join("\n");
+        for (count, store_mask, load_mask) in [(3,0xe000u16,7u16), (5,0xf800,0x1f), (10,0xffc0,0x3ff)] {
+            let registers = (0..count).map(|index| format!("a{index}")).collect::<Vec<_>>().join(",");
+            let source = format!("{header}\nPUSH {registers}\nPULL {registers}");
+            let mut assembler = Assembler::new();
+            let ast = assembler.pass_one(&source.lines().collect::<Vec<_>>()).unwrap();
+            let expected = [0x098fu16,store_mask,0x09af,load_mask].into_iter().flat_map(u16::to_le_bytes).collect::<Vec<_>>();
+            assert_eq!(assembler.pass_two(&ast).unwrap(), expected, "{count} registers");
+        }
+        for (push, pull, base) in [("PUSH","PULL",15), ("PUSHP","PULLP",12)] {
+            for count in 1..=2 {
+                let registers = (0..count).map(|index| format!("a{index}")).collect::<Vec<_>>().join(",");
+                let source = format!("{header}\n{push} {registers}\n{pull} {registers}");
+                let mut assembler = Assembler::new();
+                let ast = assembler.pass_one(&source.lines().collect::<Vec<_>>()).unwrap();
+                let moved = ast.iter().filter_map(|instruction| match instruction {
+                    Instruction::Move { src: Operand::Reg(reg), dst: Operand::IndirectPreDec(stack), .. } => Some((reg,stack)),
+                    Instruction::Move { src: Operand::IndirectPostInc(stack), dst: Operand::Reg(reg), .. } => Some((reg,stack)),
+                    _ => None,
+                }).map(|(reg,stack)| { assert_eq!(encoder::encode_register(stack),base); encoder::encode_register(reg) }).collect::<Vec<_>>();
+                let expected: Vec<u8> = (0..count).chain((0..count).rev()).collect();
+                assert_eq!(moved,expected,"{push} {count} registers");
+            }
+        }
+        let mut assembler = Assembler::new();
+        let source = "alias .set b4\n.if $isreg(alias)\n.word 1\n.endif\n.if $isreg(missing)\n.word 99\n.endif";
+        let ast = assembler.pass_one(&source.lines().collect::<Vec<_>>()).unwrap();
+        assert_eq!(assembler.pass_two(&ast).unwrap(), vec![1,0]);
+    }
+
+    #[test]
+    fn omitted_instruction_diagnostic_counts_mnemonics_but_not_metadata() {
+        let mut assembler = Assembler::new();
+        let ast = assembler.pass_one(&["SEXT a0,1", "sext a1,1", ".title sample", "nop", "mmtm sp,a0"]).unwrap();
+        assert_eq!(omitted_instructions(&ast), vec![OmittedInstruction { mnemonic: "SEXT".into(), count: 2 }]);
+    }
 
     #[test]
     fn branch_and_call_words_match_reference_and_reserved_displacements_expand() {
@@ -640,6 +715,8 @@ mod loop_expression_tests {
 struct ConditionalFrame {
     parent_active: bool,
     branch_taken: bool,
+    any_taken: bool,
+    else_seen: bool,
 }
 
 impl Assembler {
@@ -677,6 +754,14 @@ impl Assembler {
             if next == expanded { break; }
             expanded = next;
         }
+        while let Some(start) = expanded.to_ascii_lowercase().find("$isreg(") {
+            let argument_start = start + "$isreg(".len();
+            let Some(end) = expanded[argument_start..].find(')').map(|offset| argument_start + offset) else { break; };
+            let argument = expanded[argument_start..end].trim();
+            let register = self.register_aliases.get(argument).map(String::as_str).unwrap_or(argument);
+            let valid = parser::parse_register(register).is_ok_and(|(rest, _)| rest.trim().is_empty());
+            expanded.replace_range(start..=end, if valid { "1" } else { "0" });
+        }
         parser::evaluate_arithmetic(&expanded, |name| {
             self.symbol_table.get(name).or_else(|| self.symbol_table.get_ignore_case(name)).copied().unwrap_or(0) as i32
         })
@@ -689,6 +774,7 @@ impl Assembler {
             current_address: 0,
             assignment_aliases: HashMap::new(),
             object_format: false,
+            register_aliases: HashMap::new(),
         }
     }
 
@@ -701,7 +787,6 @@ impl Assembler {
         let mut current_macro: Option<MacroTemplate> = None;
         let mut macro_expansion_count = 0usize;
         let mut volatile_symbols = HashSet::<String>::new();
-        let mut register_aliases = HashMap::<String, String>::new();
 
         let mut line_queue: VecDeque<String> = lines.iter().map(|s| s.to_string()).collect();
         let mut processed_lines = 0usize;
@@ -736,6 +821,7 @@ impl Assembler {
 
             let conditional_directive = upper_trimmed.split_whitespace().next().unwrap_or("");
             if conditional_directive == ".IF"
+                || conditional_directive == ".ELSEIF"
                 || conditional_directive == ".ELSE"
                 || conditional_directive == ".ENDIF"
             {
@@ -746,13 +832,27 @@ impl Assembler {
                     conditionals.push(ConditionalFrame {
                         parent_active,
                         branch_taken: active,
+                        any_taken: active,
+                        else_seen: false,
                     });
-                } else if conditional_directive == ".ELSE" {
-                    if let Some(frame) = conditionals.last_mut() {
-                        frame.branch_taken = frame.parent_active && !frame.branch_taken;
+                } else if conditional_directive == ".ELSE" || conditional_directive == ".ELSEIF" {
+                    let Some(frame) = conditionals.last_mut() else {
+                        return Err(AsmError::Parse { line: line_num, message: format!("unexpected {conditional_directive} without .if") });
+                    };
+                    if frame.else_seen {
+                        return Err(AsmError::Parse { line: line_num, message: format!("unexpected {conditional_directive} after .else") });
                     }
+                    let eligible = frame.parent_active && !frame.any_taken;
+                    frame.branch_taken = eligible && (conditional_directive == ".ELSE" || {
+                        let expression = trimmed.splitn(2, char::is_whitespace).nth(1).unwrap_or("0");
+                        self.eval_condition(expression) != 0
+                    });
+                    frame.any_taken |= frame.branch_taken;
+                    frame.else_seen = conditional_directive == ".ELSE";
                 } else {
-                    conditionals.pop();
+                    if conditionals.pop().is_none() {
+                        return Err(AsmError::Parse { line: line_num, message: "unexpected .endif without .if".to_string() });
+                    }
                 }
                 continue;
             }
@@ -872,16 +972,16 @@ impl Assembler {
                         let words: Vec<&str> = trimmed.split_whitespace().collect();
                         if words.len() >= 3 {
                             let expression = words[2..].join(" ");
-                            let register = register_aliases.get(expression.trim()).cloned().or_else(|| {
+                            let register = self.register_aliases.get(expression.trim()).cloned().or_else(|| {
                                 parser::parse_register(expression.trim()).ok()
                                     .filter(|(rest, _)| rest.is_empty())
                                     .map(|_| expression.trim().to_string())
                             });
                             if let Some(register) = register {
-                                register_aliases.insert(name, register);
+                                self.register_aliases.insert(name, register);
                                 continue;
                             }
-                            register_aliases.remove(&name);
+                            self.register_aliases.remove(&name);
                             value = self.eval_arithmetic(&expression);
                             pending_equates.push((
                                 name.clone(),
@@ -1337,7 +1437,7 @@ impl Assembler {
             // 9. Parse Instructions with move/movi/jrz/jrn translation and size suffix stripping
             let mut parser_trimmed = trimmed.to_string();
             if let Some((mnemonic, operands)) = trimmed.split_once(char::is_whitespace) {
-                let (names, registers): (Vec<_>, Vec<_>) = register_aliases.iter()
+                let (names, registers): (Vec<_>, Vec<_>) = self.register_aliases.iter()
                     .map(|(name, register)| (name.clone(), register.clone())).unzip();
                 parser_trimmed = format!("{} {}", mnemonic, substitute_macro_parameters(operands, &names, &registers));
             }
@@ -1449,6 +1549,9 @@ impl Assembler {
         }
 
         // Re-layout after labels and equates are known. Branches that promote to
+        if !conditionals.is_empty() {
+            return Err(AsmError::Parse { line: processed_lines, message: "missing .endif".to_string() });
+        }
         // the two-word form move later labels, so repeat until addresses settle.
         // Reserve external transfers before layout as well as during object
         // serialization; otherwise nearby DSJS/branches see incorrect distances.
@@ -1651,6 +1754,14 @@ fn main() -> Result<(), AsmError> {
 
     // Now pass the &str slice to pass_one
     let ast = assembler.pass_one(&line_refs)?;
+    let omissions = omitted_instructions(&ast);
+    if !omissions.is_empty() {
+        let summary = omissions.iter().map(|item| format!("{} ({})", item.mnemonic, item.count)).collect::<Vec<_>>().join(", ");
+        if args.deny_omitted_instructions {
+            return Err(AsmError::Parse { line: 0, message: format!("instructions emit no code: {summary}") });
+        }
+        eprintln!("WARNING: instructions emit no code: {summary}");
+    }
 
     if args.verbose {
         println!("Symbol Table: {:?}", assembler.symbol_table);
