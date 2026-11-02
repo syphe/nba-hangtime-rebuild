@@ -84,6 +84,18 @@ pub fn encode_instruction(
             // .usect allocates uninitialized RAM space; no ROM bytes emitted
         }
         ParsedInstruction::Directive { name, args } => {
+            if name.eq_ignore_ascii_case(".STRING") {
+                for arg in args {
+                    if let Some(text) = arg.strip_prefix('"').and_then(|text| text.strip_suffix('"'))
+                        .or_else(|| arg.strip_prefix('\'').and_then(|text| text.strip_suffix('\''))) {
+                        bytes.extend_from_slice(text.as_bytes());
+                    } else {
+                        bytes.push(resolve_immed_expr_part(arg, symbols)? as u8);
+                    }
+                }
+            } else if name.eq_ignore_ascii_case(".EVEN") && current_addr % 2 != 0 {
+                bytes.push(0);
+            }
             if name.eq_ignore_ascii_case(".WORD") || name.eq_ignore_ascii_case(".LONG") {
                 let long = name.eq_ignore_ascii_case(".LONG");
                 for arg in args {

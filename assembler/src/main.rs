@@ -475,6 +475,15 @@ mod loop_expression_tests {
     use super::*;
 
     #[test]
+    fn strings_preserve_punctuation_control_bytes_and_word_alignment() {
+        let mut assembler = Assembler::new();
+        let source = ".string \"A,B;C\",1,-1,0 ; comment\n.string 'Z'\n.even\nafter .word 1234h\n.even";
+        let ast = assembler.pass_one(&source.lines().collect::<Vec<_>>()).unwrap();
+        assert_eq!(assembler.symbol_table.get("after"), Some(&10));
+        assert_eq!(assembler.pass_two(&ast).unwrap(), b"A,B;C\x01\xff\0Z\0\x34\x12");
+    }
+
+    #[test]
     fn arithmetic_obeys_grouping_precedence_and_signed_division() {
         let assembler = Assembler::new();
         for (expression, expected) in [
@@ -1095,6 +1104,10 @@ impl Assembler {
                     self.current_address += (args.len() * 2) as u32;
                 } else if name.eq_ignore_ascii_case(".LONG") {
                     self.current_address += (args.len() * 4) as u32;
+                } else if name.eq_ignore_ascii_case(".STRING") || name.eq_ignore_ascii_case(".EVEN") {
+                    let directive = Instruction::Directive { name: name.clone(), args: args.clone() };
+                    self.current_address += encoder::encode_instruction(&directive, self.current_address, &self.symbol_table)
+                        .map_err(|error| AsmError::Parse { line: line_num, message: error.to_string() })?.len() as u32;
                 }
                 if name.eq_ignore_ascii_case(".asg") || name.eq_ignore_ascii_case(".eval") {
                     let assignment = if args.len() >= 2 {

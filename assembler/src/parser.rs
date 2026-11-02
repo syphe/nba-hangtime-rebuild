@@ -434,17 +434,22 @@ pub fn parse_move(input: &str) -> IResult<&str, ParsedInstruction> {
 // }
 
 pub fn sanitize_line(input: &str) -> String {
-    input
+    let printable = input
         .chars()
         // Filter out Ctrl+Z (EOF) and other non-printable control characters (except tab/newline/cr)
         .filter(|&c| c != '\u{001A}' && (c >= ' ' || c == '\t' || c == '\n' || c == '\r'))
-        .collect::<String>()
-        // Also strip comments starting with ';' or '*'
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string()
+        .collect::<String>();
+    let mut quote = None;
+    for (index, ch) in printable.char_indices() {
+        if let Some(active) = quote {
+            if ch == active { quote = None; }
+        } else if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+        } else if ch == ';' {
+            return printable[..index].trim().to_string();
+        }
+    }
+    printable.trim().to_string()
 }
 
 pub fn parse_line(input: &str) -> IResult<&str, ParsedInstruction> {
