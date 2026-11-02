@@ -507,6 +507,54 @@ mod loop_expression_tests {
     use super::*;
 
     #[test]
+    fn hash_targets_emit_branches_calls_and_keep_local_symbol_names() {
+        let source = "outside\nnop\njrle #local\ncallr #local\n#local rets\njrne #local";
+        let mut assembler = Assembler::new();
+        let ast = assembler.pass_one(&source.lines().collect::<Vec<_>>()).unwrap();
+        assert!(omitted_instructions(&ast).is_empty());
+        assert_eq!(assembler.symbol_table.get("#local"), Some(&8));
+        assert_eq!(assembler.symbol_table.get("local"), Some(&8));
+        let binary = assembler.pass_two(&ast).unwrap();
+        assert_eq!(binary, vec![0,3,2,0xc6,0x20,0x0d,0,0,0x60,9,0xfe,0xcb]);
+        let object = ObjectFile::from_assembler(Path::new("test.asm"), &assembler, &ast, &binary);
+        assert_eq!(object.fixups.iter().map(|fixup| (fixup.symbol.as_str(),fixup.kind.as_str(),fixup.offset)).collect::<Vec<_>>(),
+                   vec![("#local","tms34010-relative",2),("#local","tms34010-relative16",6),("#local","tms34010-relative",10)]);
+        for (source, expected) in [("jage #local",5), ("jaz #local",10), ("janz #local",11), ("jac #local",8)] {
+            assert!(matches!(parser::parse_line(source).unwrap().1, Instruction::Jacc { condition, target } if condition == expected && target == "#local"));
+        }
+    }
+
+    #[test]
+    fn hash_locals_do_not_shadow_global_names_or_guess_between_duplicates() {
+        let mut assembler = Assembler::new();
+        let source = "dest\nnop\njr #dest\n#dest\nrets\njr dest";
+        let ast = assembler.pass_one(&source.lines().collect::<Vec<_>>()).unwrap();
+        assert_eq!(assembler.symbol_table.get("dest"), Some(&0));
+        assert_eq!(assembler.symbol_table.get("#dest"), Some(&6));
+        assert!(assembler.pass_two(&ast).is_ok());
+        let mut assembler = Assembler::new();
+        assert!(assembler.pass_one(&["#loop", "nop", "#loop", "jr #loop"]).unwrap_err().to_string().contains("ambiguous repeated local target"));
+        let mut assembler = Assembler::new();
+        let ast = assembler.pass_one(&["jr #ordinary", "nop", "ordinary", "rets"]).unwrap();
+        assert!(matches!(&ast[0], Instruction::Jr { label } if label == "ordinary"));
+        assert!(parser::parse_relative_conditional("jrle #local+4").is_err());
+        let mut assembler = Assembler::new();
+        let ast = assembler.pass_one(&["entry jrle #done", "other jaz #done", "#done", "rets"]).unwrap();
+        assert!(omitted_instructions(&ast).is_empty());
+        assert!(assembler.symbol_table.get("entry").is_some());
+        assert!(assembler.symbol_table.get("other").is_some());
+        let mut assembler = Assembler::new();
+        let ast = assembler.pass_one(&["dest .equ 42", "jr #dest", "#dest", "rets"]).unwrap();
+        let binary = assembler.pass_two(&ast).unwrap();
+        let object = ObjectFile::from_assembler(Path::new("test.asm"), &assembler, &ast, &binary);
+        assert_eq!(assembler.symbol_table.get("dest"),Some(&42));
+        assert_eq!(object.symbols.iter().find(|symbol| symbol.name == "dest").unwrap().section, "");
+        let mut assembler = Assembler::new();
+        let ast = assembler.pass_one(&["target .set b4", "callr #target", "#target", "rets"]).unwrap();
+        assert!(matches!(&ast[0], Instruction::Callr { label } if label == "#target"));
+    }
+
+    #[test]
     fn elseif_chooses_only_first_match_and_respects_inactive_parents() {
         let source = ".if 0\n.word 99\n.elseif 1\n.word 1\n.elseif 1\n.word 99\n.else\n.word 99\n.endif\n.if 0\n.if 0\n.elseif 1\n.word 99\n.else\n.word 99\n.endif\n.endif\n.if 0\n.elseif 0\n.else\n.word 2\n.endif";
         let mut assembler = Assembler::new();
@@ -804,6 +852,7 @@ impl Assembler {
                 }
             }
             let mut trimmed = trimmed_owned.as_str();
+            if trimmed.starts_with("#*") { continue; }
             let upper_trimmed = trimmed.to_uppercase();
             let line_num = processed_lines; // approximate
 
@@ -1086,7 +1135,7 @@ impl Assembler {
                     let is_equ = remainder.to_ascii_lowercase().starts_with(".equ")
                         || remainder.to_ascii_lowercase().starts_with("equ ");
                     if !is_equ {
-                        label_name_to_insert = first_word.trim_end_matches(':').to_string();
+                        label_name_to_insert = format!("#{}", first_word.trim_end_matches(':'));
                         is_label = true;
                         trimmed = remainder;
                     }
@@ -1173,6 +1222,7 @@ impl Assembler {
                             | "TRAP"
                             | "LINE"
                     );
+                    let is_opcode = is_opcode || parser::branch_condition(first_word).is_some();
                     let is_directive = first_word.starts_with('.');
                     let is_macro = self.macro_table.get(&upper_first).is_some_and(|template| {
                         template.params.is_empty() || parts.len() > 1
@@ -1284,6 +1334,7 @@ impl Assembler {
                                     | "TRAP"
                                     | "LINE"
                             );
+                            let second_is_opcode = second_is_opcode || parser::branch_condition(second_word).is_some();
                             if second_word.starts_with('.')
                                 || second_is_opcode
                                 || self.macro_table.contains_key(&upper_second)
@@ -1439,7 +1490,9 @@ impl Assembler {
             if let Some((mnemonic, operands)) = trimmed.split_once(char::is_whitespace) {
                 let (names, registers): (Vec<_>, Vec<_>) = self.register_aliases.iter()
                     .map(|(name, register)| (name.clone(), register.clone())).unzip();
-                parser_trimmed = format!("{} {}", mnemonic, substitute_macro_parameters(operands, &names, &registers));
+                let explicit_local = operands.trim_start().starts_with('#') &&
+                    (parser::branch_condition(mnemonic).is_some() || matches!(mnemonic.to_ascii_uppercase().as_str(), "CALL" | "CALLR" | "CALLI"));
+                parser_trimmed = format!("{} {}", mnemonic, if explicit_local { operands.to_string() } else { substitute_macro_parameters(operands, &names, &registers) });
             }
             let upper_pt = parser_trimmed.to_uppercase();
             if (upper_pt.starts_with("MOVE")
@@ -1552,6 +1605,52 @@ impl Assembler {
         if !conditionals.is_empty() {
             return Err(AsmError::Parse { line: processed_lines, message: "missing .endif".to_string() });
         }
+        // Preserve explicit hash-local references separately from ordinary
+        // symbols, while retaining legacy bare references to unique locals.
+        let mut hash_counts = HashMap::<String, usize>::new();
+        let mut normal_labels = HashSet::new();
+        for instruction in &ast {
+            if let Instruction::Label(name) = instruction {
+                if name.starts_with('#') { *hash_counts.entry(name.clone()).or_default() += 1; }
+                else { normal_labels.insert(name.clone()); }
+            }
+            if let Instruction::Equ { name, .. } = instruction {
+                normal_labels.insert(name.clone());
+            }
+            if let Instruction::Directive { name, args } = instruction {
+                if name.eq_ignore_ascii_case(".bss") && args.len() >= 2 { normal_labels.insert(args[0].clone()); }
+            }
+        }
+        for instruction in &mut ast {
+            let target = match instruction {
+                Instruction::Jr { label } | Instruction::Jeq { label } | Instruction::Jne { label }
+                | Instruction::Call { label } | Instruction::Callr { label } => Some(label),
+                Instruction::Jrcc { target, .. } | Instruction::Jacc { target, .. } | Instruction::LongJrcc { target, .. }
+                | Instruction::Jlt { target } | Instruction::Jgt { target } | Instruction::Dsjs { target, .. } => Some(target),
+                _ => None,
+            };
+            if let Some(target) = target.filter(|name| name.starts_with('#')) {
+                match hash_counts.get(target) {
+                    Some(1) => {},
+                    Some(_) => return Err(AsmError::Parse { line: 0, message: format!("ambiguous repeated local target {target}; use a unique label") }),
+                    None if !normal_labels.contains(target) => *target = target.trim_start_matches('#').to_string(),
+                    None => {},
+                }
+            }
+        }
+        let mut with_aliases = Vec::with_capacity(ast.len() + hash_counts.len());
+        for instruction in ast {
+            if let Instruction::Label(name) = &instruction {
+                if let Some(bare) = name.strip_prefix('#') {
+                    if !normal_labels.contains(bare) {
+                        self.symbol_table.insert(bare.to_string(), self.symbol_table.get(name).copied().unwrap_or(0));
+                        with_aliases.push(Instruction::Label(bare.to_string()));
+                    }
+                }
+            }
+            with_aliases.push(instruction);
+        }
+        let mut ast = with_aliases;
         // the two-word form move later labels, so repeat until addresses settle.
         // Reserve external transfers before layout as well as during object
         // serialization; otherwise nearby DSJS/branches see incorrect distances.

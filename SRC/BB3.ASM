@@ -3156,17 +3156,17 @@ sp_showshotper
 	clr	a11
 
 ;DJT Start
-	WAITSWITCH_DWN	JOY_UP,#lpss,0
+	WAITSWITCH_DWN	JOY_UP,#showshotper_lp,0
 
 	movi	#TIMEOUT,a11
 
-	WAITSWITCH_DWN	JOY_UP_RIGHT,#lpss,1
-	WAITSWITCH_DWN	JOY_RIGHT,#lpss,1
-	WAITSWITCH_DWN	JOY_DOWN_RIGHT,#lpss,1
-	WAITSWITCH_DWN	JOY_DOWN,#lpss,1
-	WAITSWITCH_DWN	JOY_DOWN_LEFT,#lpss,1
-	WAITSWITCH_DWN	JOY_LEFT,#lpss,1
-	WAITSWITCH_DWN	JOY_UP_LEFT,#lpss,1
+	WAITSWITCH_DWN	JOY_UP_RIGHT,#showshotper_lp,1
+	WAITSWITCH_DWN	JOY_RIGHT,#showshotper_lp,1
+	WAITSWITCH_DWN	JOY_DOWN_RIGHT,#showshotper_lp,1
+	WAITSWITCH_DWN	JOY_DOWN,#showshotper_lp,1
+	WAITSWITCH_DWN	JOY_DOWN_LEFT,#showshotper_lp,1
+	WAITSWITCH_DWN	JOY_LEFT,#showshotper_lp,1
+	WAITSWITCH_DWN	JOY_UP_LEFT,#showshotper_lp,1
 
 ;a9=0-3 for player
 	movi	pwrup_snds,a11

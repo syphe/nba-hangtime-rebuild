@@ -37,19 +37,23 @@ class RelativeRelocations(unittest.TestCase):
     def test_linker_applies_short_and_dsjs_fields_in_real_rom(self):
         obj = dict(format='tms34010-object', sections=[dict(name='.text', data=base64.b64encode(
             bytes([0x55, 0xCA, 0x33, 0x3C, 0, 3, 0, 3])).decode())],
-            symbols=[dict(name='next', section='.text', section_offset=6, kind='symbol')],
-            fixups=[dict(section='.text', offset=0, symbol='next', kind='tms34010-relative'),
-                    dict(section='.text', offset=2, symbol='next', kind='tms34010-dsjs5')])
+            symbols=[dict(name='#local', section='.text', section_offset=6, kind='symbol')],
+            fixups=[dict(section='.text', offset=0, symbol='#local', kind='tms34010-relative'),
+                    dict(section='.text', offset=2, symbol='#local', kind='tms34010-dsjs5')])
         build = Path(__file__).resolve().parent / 'build'
         build.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=build) as temporary:
             root = Path(temporary)
             self.assertTrue(root.resolve().is_relative_to(build.resolve()))
             (root / 'test.OBJ').write_text(json.dumps(obj))
+            other = json.loads(json.dumps(obj))
+            other['sections'][0]['data'] = base64.b64encode(bytes([0x55,0xCB,0x33,0x3C,0,3,0,3])).decode()
+            (root / 'other.OBJ').write_text(json.dumps(other))
             subprocess.run([sys.executable, str(Path(__file__).with_name('link.py')),
-                            str(root / 'test.OBJ'), '--output', str(root / 'ROM.bin')],
+                            str(root / 'test.OBJ'), str(root / 'other.OBJ'), '--output', str(root / 'ROM.bin')],
                            check=True, capture_output=True)
             self.assertEqual((root / 'ROM.bin').read_bytes()[:4], bytes([2, 0xCA, 0x33, 0x38]))
+            self.assertEqual((root / 'ROM.bin').read_bytes()[8:12], bytes([2, 0xCB, 0x33, 0x38]))
 
 
 if __name__ == '__main__':

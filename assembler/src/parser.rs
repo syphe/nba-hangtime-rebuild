@@ -4,7 +4,7 @@ use nom::{
     character::complete::{
         alphanumeric1, char, multispace0, multispace1, satisfy, space0, space1, u32 as parse_u32,
     },
-    combinator::{map, opt},
+    combinator::{map, opt, recognize},
     sequence::{delimited, preceded, separated_pair},
     IResult,
 };
@@ -545,12 +545,21 @@ pub fn parse_unknown_instruction(input: &str) -> IResult<&str, ParsedInstruction
     ))
 }
 
+/// A complete branch/call target, retaining an explicit hash-local namespace.
+fn parse_branch_target(input: &str) -> IResult<&str, &str> {
+    let (rest, target) = recognize(tuple((opt(char('#')), take_while1(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.'))))(input)?;
+    if !rest.trim().is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(rest, nom::error::ErrorKind::Eof)));
+    }
+    Ok((rest, target))
+}
+
 /// Parse a JR (Jump Relative) instruction (e.g., "JR START_LOOP")
 /// Parse JR or JRUC (Jump Relative / Unconditional) instruction (e.g., "JRUC _ac_loop")
 pub fn parse_jr(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = alt((tag_no_case("JRUC"), tag_no_case("JR")))(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, label) = parse_identifier(input)?;
+    let (input, label) = parse_branch_target(input)?;
     Ok((
         input,
         ParsedInstruction::Jr {
@@ -558,43 +567,37 @@ pub fn parse_jr(input: &str) -> IResult<&str, ParsedInstruction> {
         },
     ))
 }
+pub fn branch_condition(mnemonic: &str) -> Option<(bool, u8)> {
+    let upper = mnemonic.to_ascii_uppercase();
+    if !upper.starts_with("JR") && !upper.starts_with("JA") { return None; }
+    let condition = match &upper[2..] {
+        "UC" | "" => 0x0, "P" => 0x1, "LS" => 0x2, "HI" => 0x3,
+        "LT" => 0x4, "GE" => 0x5, "LE" => 0x6, "GT" => 0x7,
+        "LO" | "C" | "B" => 0x8, "HS" | "NC" | "NB" => 0x9,
+        "EQ" | "Z" => 0xA, "NE" | "NZ" => 0xB,
+        "V" => 0xC, "NV" => 0xD, "N" => 0xE, "NN" => 0xF,
+        _ => return None,
+    };
+    Some((upper.starts_with("JA"), condition))
+}
+
 pub fn parse_relative_conditional(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, mnemonic) = parse_identifier(input)?;
-    if !mnemonic.to_ascii_uppercase().starts_with("JR") {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Tag,
-        )));
-    }
-    let (input, _) = multispace1(input)?;
-    let (input, label) = parse_identifier(input)?;
-    let condition = match mnemonic.to_ascii_uppercase().as_str() {
-        "JRUC" | "JR" => 0x0,
-        "JRP" => 0x1,
-        "JRLS" => 0x2,
-        "JRHI" => 0x3,
-        "JRLT" | "JLT" => 0x4,
-        "JRGE" => 0x5,
-        "JRLE" => 0x6,
-        "JRGT" | "JGT" => 0x7,
-        "JRLO" | "JRC" | "JRB" => 0x8,
-        "JRHS" | "JRNC" | "JRNB" => 0x9,
-        "JREQ" | "JRZ" | "JEQ" => 0xA,
-        "JRNE" | "JRNZ" | "JNE" => 0xB,
-        "JRV" | "JAV" => 0xC,
-        "JRNV" | "JANV" => 0xD,
-        "JRN" | "JAN" => 0xE,
-        "JRNN" | "JANN" => 0xF,
-        _ => return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))),
+    let Some((absolute, condition)) = branch_condition(mnemonic) else {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
     };
-    Ok((input, ParsedInstruction::Jrcc { condition, target: label.to_string() }))
+    let (input, _) = multispace1(input)?;
+    let (input, label) = parse_branch_target(input)?;
+    Ok((input, if absolute {
+        ParsedInstruction::Jacc { condition, target: label.to_string() }
+    } else { ParsedInstruction::Jrcc { condition, target: label.to_string() } }))
 }
 
 /// Parse a CALL instruction (e.g., "CALL SUBROUTINE")
 pub fn parse_call(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = tag_no_case("CALL")(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, label) = parse_identifier(input)?;
+    let (input, label) = parse_branch_target(input)?;
     Ok((
         input,
         ParsedInstruction::Call {
@@ -631,7 +634,7 @@ pub fn parse_sub(input: &str) -> IResult<&str, ParsedInstruction> {
 pub fn parse_jahs(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = tag_no_case("JAHS")(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, label) = parse_identifier(input)?;
+    let (input, label) = parse_branch_target(input)?;
     Ok((
         input,
         ParsedInstruction::Jacc { condition: 0x9, target: label.to_string() },
@@ -642,7 +645,7 @@ pub fn parse_jahs(input: &str) -> IResult<&str, ParsedInstruction> {
 pub fn parse_jeq(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = tag_no_case("JEQ")(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, label) = parse_identifier(input)?;
+    let (input, label) = parse_branch_target(input)?;
     Ok((
         input,
         ParsedInstruction::Jeq {
@@ -655,7 +658,7 @@ pub fn parse_jeq(input: &str) -> IResult<&str, ParsedInstruction> {
 pub fn parse_jne(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = tag_no_case("JNE")(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, label) = parse_identifier(input)?;
+    let (input, label) = parse_branch_target(input)?;
     Ok((
         input,
         ParsedInstruction::Jne {
@@ -890,7 +893,7 @@ pub fn parse_jlt(input: &str) -> IResult<&str, ParsedInstruction> {
     map(
         preceded(
             tuple((alt((tag_no_case("JRLT"), tag_no_case("JLT"))), space1)),
-            take_while1(|c: char| c.is_alphanumeric() || c == '_'),
+            parse_branch_target,
         ),
         |target: &str| ParsedInstruction::Jlt {
             target: target.to_string(),
@@ -903,7 +906,7 @@ pub fn parse_jgt(input: &str) -> IResult<&str, ParsedInstruction> {
     map(
         preceded(
             tuple((alt((tag_no_case("JRGT"), tag_no_case("JGT"))), space1)),
-            take_while1(|c: char| c.is_alphanumeric() || c == '_'),
+            parse_branch_target,
         ),
         |target: &str| ParsedInstruction::Jgt {
             target: target.to_string(),
@@ -1234,7 +1237,7 @@ pub fn parse_movi(input: &str) -> IResult<&str, ParsedInstruction> {
 pub fn parse_calli(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = tag_no_case("CALLI")(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, label) = parse_identifier(input)?;
+    let (input, label) = parse_branch_target(input)?;
     Ok((
         input,
         ParsedInstruction::Call {
@@ -1442,7 +1445,7 @@ pub fn parse_dsjs(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
     // Allow alphanumeric characters, underscores, $, and .
     let (input, target) =
-        take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '$' || c == '.')(input)?;
+        take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '$' || c == '.' || c == '#')(input)?;
 
     Ok((
         input,
@@ -1478,7 +1481,7 @@ pub fn parse_btst(input: &str) -> IResult<&str, ParsedInstruction> {
 pub fn parse_callr(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = alt((tag_no_case("CALLR"), tag_no_case("JSRP")))(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, label) = take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.')(input)?;
+    let (input, label) = parse_branch_target(input)?;
 
     Ok((
         input,
@@ -1492,7 +1495,7 @@ pub fn parse_callr(input: &str) -> IResult<&str, ParsedInstruction> {
 pub fn parse_jauc(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = tag_no_case("JAUC")(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, target) = parse_identifier(input)?;
+    let (input, target) = parse_branch_target(input)?;
     Ok((input, ParsedInstruction::Jacc { condition: 0, target: target.to_string() }))
 }
 

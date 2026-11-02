@@ -24,9 +24,9 @@ nodes['#different'].onchange();
 assert.match(nodes['#count'].textContent, /^0 \/ 153/);
 nodes['#search'].value = '';
 nodes['#different'].checked = false;
-vm.runInContext("key='delta';direction=-1;rows()", context);
-assert.match(nodes['#modules'].innerHTML, /<tr><td>ATTRACT<\/td><td>\.data<\/td>/);
 const fixture = vm.runInContext('JSON.parse(JSON.stringify(R))', context);
+fixture.modules = [{module:'ZZZ',section:'.text',actual_bits:128,expected_bits:64,status:'size differs',comparison:null},
+                   {module:'AAA',section:'.text',actual_bits:0,expected_bits:64,status:'size differs',comparison:null}];
 fixture.coverage = [{module:'DEMO',omitted:[{mnemonic:'SEXT',count:2},{mnemonic:'NEG',count:1}]},
                     {module:'OLD',omitted:null}];
 const coverageNodes = {};
@@ -34,7 +34,10 @@ const coverageDocument = { querySelector: key => coverageNodes[key] ||= {innerHT
                            querySelectorAll: () => [] };
 const fixtureScript = script.replace(/^const R=.*;\r?\n/, 'const R='+JSON.stringify(fixture)+';\n');
 assert.notEqual(fixtureScript, script);
-vm.runInNewContext(fixtureScript, {document:coverageDocument});
+const fixtureContext = vm.createContext({document:coverageDocument});
+vm.runInContext(fixtureScript, fixtureContext);
+vm.runInContext("key='delta';direction=-1;rows()", fixtureContext);
+assert.match(coverageNodes['#modules'].innerHTML, /<tr><td>ZZZ<\/td>/);
 assert.match(coverageNodes['#coverage'].innerHTML, /3 omitted instruction occurrences across 1 modules/);
 assert.match(coverageNodes['#coverage'].innerHTML, /unavailable for 1 modules/);
 assert.match(coverageNodes['#coverage'].innerHTML, /SEXT \(2\), NEG \(1\)/);
