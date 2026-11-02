@@ -41,8 +41,7 @@ SCORE.OBJ		/* fixed file. doublecheck! score stuff,clocks,on fire clk.. */
 SCORE2.OBJ		/* fixed file. score stuff */
 SOUNDS.OBJ		/* fixed file. sound processor */
 PATCH.OBJ		/* file OK. TV PATCH/BREAKPOINT HOOK */
-TEXT.OBJ		/* fixed file, had to comment stuff to avoid mem error! font tables */
-TEXT2.OBJ		/* added file, memory issues when compiling. the tables are needed! */
+TEXT.OBJ		/* font and player-head tables, matching the legacy TEXT object */
 ATTRACT.OBJ		/* fixed file. attract mode */
 STRING.OBJ		/* fixed file. string printing stuff !!AM!! check for # symbol !! */
 RECORD.OBJ		/* fixed file. CMOS records etc !!AM!! check for # symbol !! */

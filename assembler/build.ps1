@@ -80,7 +80,7 @@ $dependencies = @{
     ADJUST = @("menu.equ")
     MPROC = @("mproc.equ")
     IMGTBL = @("imgtbl.glo", "fonttbl.glo", "roboimg.glo", "bgndtbl.glo")
-    TEXT = @("text.tbl", "mugshot.tbl")
+    TEXT = @("text.tbl", "mugshot.tbl", "plyrhd5.glo", "plyrhd5.tbl", "imgpal4.asm")
     UNZIP = @("bbvda.tbl")
 }
 
