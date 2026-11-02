@@ -96,7 +96,7 @@ def section_name(name: str) -> str:
     return lowered
 
 
-def resolve_expression(expression: str, symbols: dict[str, int]):
+def resolve_expression(expression: str, symbols: dict[str, int], signed_constants: set[str] | None = None):
     text = expression.strip().replace("$", "0x")
     exact_symbol = symbols.get(text.lower())
     if exact_symbol is not None:
@@ -114,7 +114,13 @@ def resolve_expression(expression: str, symbols: dict[str, int]):
             r"(?<![A-Za-z0-9_])(" + "|".join(re.escape(name) for name in symbol_names) + r")(?=$|[^A-Za-z0-9_])",
             re.IGNORECASE,
         )
-        text = symbol_pattern.sub(lambda match: str(symbols[match.group(1).lower()]), text)
+        def symbol_value(match):
+            name = match.group(1).lower()
+            value = symbols[name]
+            if signed_constants and name in signed_constants and value >= 0x80000000:
+                value -= 0x100000000
+            return str(value)
+        text = symbol_pattern.sub(symbol_value, text)
     text = text.replace("|", " | ")
 
     try:
@@ -127,6 +133,11 @@ def resolve_expression(expression: str, symbols: dict[str, int]):
             return evaluate(node.body)
         if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
             return int(node.value)
+        if isinstance(node, ast.UnaryOp):
+            value = evaluate(node.operand)
+            if isinstance(node.op, ast.UAdd): return value
+            if isinstance(node.op, ast.USub): return -value
+            if isinstance(node.op, ast.Invert): return ~value
         if isinstance(node, ast.BinOp):
             left, right = evaluate(node.left), evaluate(node.right)
             if isinstance(node.op, ast.Add): return left + right
@@ -266,6 +277,13 @@ def main():
     for path, obj, addresses in placements:
         section_addresses = addresses
         object_symbols = dict(symbols)
+        signed_constants = {
+            symbol["name"].lower()
+            for symbol in obj.get("symbols", [])
+            if not symbol.get("section")
+            and symbol.get("kind") == "symbol"
+            and symbol.get("address", 0) >= 0x80000000
+        }
         for symbol in obj.get("symbols", []):
             section_name_value = section_name(symbol.get("section", "")) if symbol.get("section") else ""
             if section_name_value in section_addresses:
@@ -285,7 +303,7 @@ def main():
             if section not in ("text", "data") or section not in section_addresses:
                 continue
             try:
-                target = resolve_expression(fixup["symbol"], object_symbols)
+                target = resolve_expression(fixup["symbol"], object_symbols, signed_constants)
             except ZeroDivisionError as error:
                 raise ValueError(
                     f"{path}: division by zero in relocation expression {fixup['symbol']!r}"
