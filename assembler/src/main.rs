@@ -479,6 +479,15 @@ mod loop_expression_tests {
         // Golden words checked against MAME's 34010dsm.cpp and PAL.OBJ.
         for (source, words) in [
             ("nop", vec![0x0300]),
+            ("inc a2", vec![0x1022]),
+            ("inc b2", vec![0x1032]),
+            ("dec a2", vec![0x1422]),
+            ("dec b2", vec![0x1432]),
+            ("not a2", vec![0x03e2]),
+            ("not b2", vec![0x03f2]),
+            ("trap 0", vec![0x0900]),
+            ("trap 31", vec![0x091f]),
+            ("rets", vec![0x0960]),
             ("movi 12345678h,a3", vec![0x09e3, 0x5678, 0x1234]),
             ("movi 12345678h,b3", vec![0x09f3, 0x5678, 0x1234]),
             ("clr a1", vec![0x5621]),
@@ -501,6 +510,11 @@ mod loop_expression_tests {
         let mut assembler = Assembler::new();
         let ast = assembler.pass_one(&["OFFSET .set b4", "clr OFFSET", "COLOR0 .set b8", "clr COLOR0"]).unwrap();
         assert_eq!(assembler.pass_two(&ast).unwrap(), vec![0x94, 0x56, 0x18, 0x57]);
+        for source in ["trap -1", "trap 32"] {
+            let mut assembler = Assembler::new();
+            let ast = assembler.pass_one(&[source]).unwrap();
+            assert!(assembler.pass_two(&ast).is_err(), "{source}");
+        }
     }
 
     #[test]

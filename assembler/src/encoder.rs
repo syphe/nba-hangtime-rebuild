@@ -483,9 +483,12 @@ pub fn encode_instruction(
                 bytes.extend_from_slice(&(fv as u16).to_le_bytes());
             }
         }
-        ParsedInstruction::Inc { .. }
-        | ParsedInstruction::Dec { .. }
-        | ParsedInstruction::Andn { .. }
+        ParsedInstruction::Inc { dst } | ParsedInstruction::Dec { dst } => {
+            let Operand::Reg(reg) = dst else { return Err(EncodeError::InvalidOperand); };
+            let base: u16 = if matches!(instr, ParsedInstruction::Inc { .. }) { 0x1020 } else { 0x1420 };
+            bytes.extend_from_slice(&(base | encode_register(reg) as u16).to_le_bytes());
+        }
+        ParsedInstruction::Andn { .. }
         | ParsedInstruction::Movy { .. }
         | ParsedInstruction::Movx { .. }
         | ParsedInstruction::RotateLeft { .. }
@@ -495,7 +498,7 @@ pub fn encode_instruction(
         }
         ParsedInstruction::Not { dst } => {
             if let Operand::Reg(reg) = dst {
-                let mut opcode: u16 = 0x2F00;
+                let mut opcode: u16 = 0x03E0;
                 opcode |= (encode_register(reg) as u16) & 0x1F;
                 bytes.extend_from_slice(&opcode.to_le_bytes());
             } else {
@@ -721,11 +724,12 @@ pub fn encode_instruction(
             bytes.extend_from_slice(&opcode.to_le_bytes());
         }
         ParsedInstruction::Rets => {
-            let opcode: u16 = 0x006F;
+            let opcode: u16 = 0x0960;
             bytes.extend_from_slice(&opcode.to_le_bytes());
         }
-        ParsedInstruction::Trap { vector: _vector } => {
-            bytes.extend_from_slice(&0x0000u16.to_le_bytes());
+        ParsedInstruction::Trap { vector } => {
+            if !(0..=31).contains(vector) { return Err(EncodeError::InvalidOperand); }
+            bytes.extend_from_slice(&(0x0900u16 | *vector as u16).to_le_bytes());
         }
         ParsedInstruction::Dsjs { reg, target } => {
             let target_addr = if target == "$" {

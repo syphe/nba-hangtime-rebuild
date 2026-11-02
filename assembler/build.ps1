@@ -154,6 +154,8 @@ if ($ObjectFormat) {
             --output-dir (Join-Path $outputDir "ROM") `
             --reference (Join-Path $repoRoot "BACKUP\XCODE101L\ROM\ROM_MINE.bin")
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & python compare_outputs.py --output (Join-Path $outputDir "comparison.html")
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     finally {
         Pop-Location

@@ -9,10 +9,16 @@ The native build/link/output pipeline works, but machine-code correctness is sti
 | Build/link | 51 modules, strict link with zero unresolved/out-of-range relocations |
 | Outputs | 14-section COFF, two 512 KiB ROM halves, combined 1 MiB ROM |
 | Regression checks | Four Rust tests pass, including golden opcode words and register aliases |
-| ROM comparison | 914,606 differing bytes; first difference at byte 0 |
+| ROM comparison | 914,738 differing bytes; first difference at byte 0 |
 | Section extents | `.text` short by 18,068 bytes; `.data` short by 13,606 bytes; BSS 64 bytes over |
 | Proven data matches | TEXT both sections; PAL data with matching preserved inputs (non-relocation bytes and relocation sites) |
 | Baseline limitations | PAL/ATTRACT input differences; PLYRSEQ2 and BB3 preserved source do not fully reproduce their preserved objects |
+
+### Visual output comparison
+
+Open `assembler/build/comparison.html` after a native object build. It is a standalone HTML report with module search, sorting, a differences filter, native/reference size bars, and byte-difference heatmaps. `comparison.json` contains the exact measurements. The report covers all 51 production objects (text/data/BSS contributions), 14 linked COFF sections, BB.OUT, BB.bin, the combined ROM, and both ROM halves.
+
+`build.ps1 -ObjectFormat` regenerates the report after successful link/ROM output. Standalone refresh from the repository root: `python assembler/compare_outputs.py`. Optional arguments: `--build-dir`, `--legacy-dir`, `--cmd-file`, and `--output`. No third-party Python or browser assets are required. Module size targets use BB.MAP with preserved-object-header fallback; byte checks use preserved objects. Size equality is distinct from byte equality. Unknown relocation kinds, missing outputs/references, uninitialized allocations, and raw COFF metadata comparisons are identified explicitly. The COFF BSS header is currently fixed by the writer, so the report also shows the independently summed object allocation size.
 
 The numbered status entries below are implementation history; this checkpoint and Section 6 contain the active status and priorities.
 
@@ -127,14 +133,17 @@ A modern, native Rust assembler designed for the TMS34010 arcade graphics proces
 - The first sweep exposed `CLR OFFSET`/`CLR COLOR0`: register `.set` aliases had previously become zero-valued constants. Pass one now records register aliases and substitutes them in instruction operands, resolving OFFSET to B4 and COLOR0 to B8. Golden reference tests cover NOP, MOVI in both files, CLR, register MOVE within/across files, register ALU forms, and the alias cases. All four tests and the final consistent 51-object strict build pass. ROM differences are now 914,606 bytes, first at byte 0. `.text` is 0x390520 bits versus 0x3B39C0 (18,068 bytes short); data remains 0x3AA7B0 bits (13,606 bytes short), BSS remains 64 bytes over. Correctly shrinking CLR increases the text-size deficit; size alone must not be used as a correctness score.
 - BB3 diagnostic assembly using preserved inputs still differs from its preserved object: before this opcode batch, text was 10,868 versus 13,610 bytes and data was 4,448 versus 6,950. The first data mismatch is after the four crowd headers (byte 56): the legacy object has 154 additional bytes before CRTPC1, which begins at 210 versus native 56. Thus even preserved BB3 inputs do not reproduce the legacy data layout. Its text also has relocation type 0x18, for which the comparison tool correctly declines a non-relocation byte-equivalence claim. Added its referenced crowd/court/cheer/outdoor tables and relevant equates to the native build dependencies. Diagnostic reports remain under `build/diagnostics`; graphics inputs were not changed.
 
+- Continued the primary MAME opcode audit: replaced zero placeholders for INC/DEC with the 1-constant ADDK/SUBK encodings (0x1020/0x1420 plus register bits), fixed NOT (0x03E0), TRAP (0x0900 plus validated 0..31 vector), and no-argument RETS (0x0960). Golden checks cover both register files, vector endpoints, and rejection of out-of-range vectors. All four Rust tests pass, and the complete 51-object strict build/link/ROM pipeline succeeds. Section extents are unchanged from the previous checkpoint; the ROM comparison now differs at 914,738 bytes. Opcode correctness is assessed against reference encodings, not by minimizing the count of differing ROM bytes.
+- Added `compare_outputs.py` and automatic post-build `comparison.html`/`comparison.json` generation. Verified 51 modules, 153 section contributions, 14 linked sections, and five output artifacts. Three Python tests pass for byte/heatmap accounting and safe report embedding; `node assembler/test_compare_outputs_ui.cjs assembler/build/comparison.html` checks table generation, module search, mismatch filtering, and sorting without a browser. Independently checked ROM mismatch counts and heatmap bucket sums against raw files. Browser visual preview was blocked by the browser URL policy for local files; no browser screenshot/render verification was performed. The offline report remains available for the user to open. `git diff --check` passes.
+
 
 ## 6. Next Steps
 
 The next implementation steps are:
 
-1. Continue the ISA audit with independent golden opcode tests and the primary MAME decoder/legacy objects. Urgent: instructions currently emitted as zero placeholders include INC, DEC, ANDN, MOVX/MOVY, rotates, FILL, PIXT, and TRAP. Audit branch/call/return forms, memory MOVE/addressing, immediate ALU forms, and shifts as well. Preserve relocation width/offset consistency when correcting sizes. Implement short MOVI only with matching layout/fixup support. Do not treat the current linked ROM as executable validation.
+1. Continue the ISA audit with independent golden opcode tests and the primary MAME decoder/legacy objects. Urgent: instructions currently emitted as zero placeholders include ANDN, MOVX/MOVY, rotates, FILL, and PIXT. INC, DEC, NOT, TRAP, and no-argument RETS are now audited; other return/call forms remain to check. Audit branch/call/return forms, memory MOVE/addressing, immediate ALU forms, and shifts as well. Preserve relocation width/offset consistency when correcting sizes. Implement short MOVI only with matching layout/fixup support. Do not treat the current linked ROM as executable validation.
 2. Establish source baselines that actually match the preserved objects before interpreting section deficits as encoder bugs. PAL data is proven correct with preserved inputs; PLYRSEQ2/BB3 have confirmed baseline discrepancies. Classify PLYRAT3's data difference next when returning to this work. Keep using `compare_object.py`, including its explicit limitation for unsupported relocation kinds.
-3. After the code audit and source reconciliation, resolve the 64-byte BSS excess and compare vector/section ranges, then perform final byte and runtime validation. Latest ROM comparison: 914,606 differing bytes.
+3. After the code audit and source reconciliation, resolve the 64-byte BSS excess and compare vector/section ranges, then perform final byte and runtime validation. Latest ROM comparison: 914,738 differing bytes.
 4. Keep graphics replacement and GSP changes separate until the program-ROM linker passes byte comparison.
 
 Graphics replacement remains separate and must not be included in the linker implementation commit.
