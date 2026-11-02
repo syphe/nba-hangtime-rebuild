@@ -475,6 +475,35 @@ mod loop_expression_tests {
     use super::*;
 
     #[test]
+    fn audited_opcodes_match_tms34010_reference_words() {
+        // Golden words checked against MAME's 34010dsm.cpp and PAL.OBJ.
+        for (source, words) in [
+            ("nop", vec![0x0300]),
+            ("movi 12345678h,a3", vec![0x09e3, 0x5678, 0x1234]),
+            ("movi 12345678h,b3", vec![0x09f3, 0x5678, 0x1234]),
+            ("clr a1", vec![0x5621]),
+            ("clr b2", vec![0x5652]),
+            ("move a2,a3", vec![0x4c43]),
+            ("move b2,b3", vec![0x4c53]),
+            ("move a2,b3", vec![0x4e43]),
+            ("move b2,a3", vec![0x4e53]),
+            ("add b2,b3", vec![0x4053]),
+            ("sub a2,a3", vec![0x4443]),
+            ("and a2,a3", vec![0x5043]),
+            ("or b2,b3", vec![0x5453]),
+            ("xor b2,b3", vec![0x5653]),
+        ] {
+            let mut assembler = Assembler::new();
+            let ast = assembler.pass_one(&[source]).unwrap();
+            let expected: Vec<u8> = words.into_iter().flat_map(u16::to_le_bytes).collect();
+            assert_eq!(assembler.pass_two(&ast).unwrap(), expected, "{source}");
+        }
+        let mut assembler = Assembler::new();
+        let ast = assembler.pass_one(&["OFFSET .set b4", "clr OFFSET", "COLOR0 .set b8", "clr COLOR0"]).unwrap();
+        assert_eq!(assembler.pass_two(&ast).unwrap(), vec![0x94, 0x56, 0x18, 0x57]);
+    }
+
+    #[test]
     fn strings_preserve_punctuation_control_bytes_and_word_alignment() {
         let mut assembler = Assembler::new();
         let source = ".string \"A,B;C\",1,-1,0 ; comment\n.string 'Z'\n.even\nafter .word 1234h\n.even";
@@ -568,6 +597,7 @@ impl Assembler {
         let mut current_macro: Option<MacroTemplate> = None;
         let mut macro_expansion_count = 0usize;
         let mut volatile_symbols = HashSet::<String>::new();
+        let mut register_aliases = HashMap::<String, String>::new();
 
         let mut line_queue: VecDeque<String> = lines.iter().map(|s| s.to_string()).collect();
         let mut processed_lines = 0usize;
@@ -738,6 +768,16 @@ impl Assembler {
                         let words: Vec<&str> = trimmed.split_whitespace().collect();
                         if words.len() >= 3 {
                             let expression = words[2..].join(" ");
+                            let register = register_aliases.get(expression.trim()).cloned().or_else(|| {
+                                parser::parse_register(expression.trim()).ok()
+                                    .filter(|(rest, _)| rest.is_empty())
+                                    .map(|_| expression.trim().to_string())
+                            });
+                            if let Some(register) = register {
+                                register_aliases.insert(name, register);
+                                continue;
+                            }
+                            register_aliases.remove(&name);
                             value = self.eval_arithmetic(&expression);
                             pending_equates.push((
                                 name.clone(),
@@ -1188,6 +1228,11 @@ impl Assembler {
 
             // 9. Parse Instructions with move/movi/jrz/jrn translation and size suffix stripping
             let mut parser_trimmed = trimmed.to_string();
+            if let Some((mnemonic, operands)) = trimmed.split_once(char::is_whitespace) {
+                let (names, registers): (Vec<_>, Vec<_>) = register_aliases.iter()
+                    .map(|(name, register)| (name.clone(), register.clone())).unzip();
+                parser_trimmed = format!("{} {}", mnemonic, substitute_macro_parameters(operands, &names, &registers));
+            }
             let upper_pt = parser_trimmed.to_uppercase();
             if (upper_pt.starts_with("MOVE")
                 || upper_pt.starts_with("MOVI")

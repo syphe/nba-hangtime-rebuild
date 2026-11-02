@@ -38,7 +38,7 @@ fn encode_conditional_relative(
     label: &str,
 ) -> Result<(), EncodeError> {
     if short_words == 0 {
-        bytes.extend_from_slice(&0x0000u16.to_le_bytes());
+        bytes.extend_from_slice(&0x0300u16.to_le_bytes());
         return Ok(());
     }
     if (-127..=127).contains(&short_words) {
@@ -72,7 +72,7 @@ pub fn encode_instruction(
 
     match instr {
         ParsedInstruction::Nop => {
-            bytes.extend_from_slice(&0x0000u16.to_le_bytes());
+            bytes.extend_from_slice(&0x0300u16.to_le_bytes());
         }
         ParsedInstruction::Equ { .. } => {
             // Equates are handled in pass one / symbol table
@@ -143,7 +143,7 @@ pub fn encode_instruction(
                 });
             }
             if short_words == 0 && long_condition.is_some() {
-                bytes.extend_from_slice(&0x0000u16.to_le_bytes());
+                bytes.extend_from_slice(&0x0300u16.to_le_bytes());
             } else if (-127..=127).contains(&short_words) {
                 bytes.extend_from_slice(&(short_opcode | (short_words as u16 & 0xFF)).to_le_bytes());
             } else if let Some(condition) = long_condition {
@@ -179,8 +179,8 @@ pub fn encode_instruction(
                 .copied().unwrap_or(current_addr);
             let relative = (target_addr as i64 - (current_addr + 4) as i64) / 2;
             if relative == 0 {
-                bytes.extend_from_slice(&0x0000u16.to_le_bytes());
-                bytes.extend_from_slice(&0x0000u16.to_le_bytes());
+                bytes.extend_from_slice(&0x0300u16.to_le_bytes());
+                bytes.extend_from_slice(&0x0300u16.to_le_bytes());
             } else if relative < i16::MIN as i64 || relative > i16::MAX as i64 {
                 bytes.extend_from_slice(&(0xC080 | ((*condition as u16) << 8)).to_le_bytes());
                 bytes.extend_from_slice(&(target_addr as u16).to_le_bytes());
@@ -230,20 +230,22 @@ pub fn encode_instruction(
                     if matches!(src_op, Operand::Immediate(_) | Operand::Symbol(_)) =>
                 {
                     let val = resolve_immediate(src_op, symbols)?;
-                    let mut opcode: u16 = 0x4400;
+                    let mut opcode: u16 = 0x09E0;
                     let d_val = encode_register(d_reg) as u16;
-                    opcode |= d_val & 0x0F;
+                    opcode |= d_val & 0x1F;
 
                     bytes.extend_from_slice(&opcode.to_le_bytes());
                     bytes.extend_from_slice(&(val as u32 as u16).to_le_bytes());
                     bytes.extend_from_slice(&((val as u32 >> 16) as u16).to_le_bytes());
                 }
                 (Operand::Reg(s_reg), Operand::Reg(d_reg)) => {
-                    let mut opcode: u16 = 0x2000;
+                    let mut opcode: u16 = 0x4C00;
                     let s_val = encode_register(s_reg) as u16;
                     let d_val = encode_register(d_reg) as u16;
-                    opcode |= (s_val & 0x0F) << 4;
+                    opcode |= (s_val & 0x0F) << 5;
                     opcode |= d_val & 0x0F;
+                    opcode |= s_val & 0x10;
+                    if (s_val ^ d_val) & 0x10 != 0 { opcode |= 0x0200; }
                     bytes.extend_from_slice(&opcode.to_le_bytes());
                 }
                 (Operand::Indirect(s_reg), Operand::Reg(d_reg)) => {
@@ -595,12 +597,20 @@ pub fn encode_instruction(
                     bytes.extend_from_slice(&(val as u16).to_le_bytes());
                 }
                 (Operand::Reg(s_reg), Operand::Reg(d_reg)) => {
-                    let base_opcode = 0x2800 + (instr_type * 0x0200);
+                    let base_opcode = match instr {
+                        ParsedInstruction::Add { .. } => 0x4000,
+                        ParsedInstruction::Sub { .. } => 0x4400,
+                        ParsedInstruction::And { .. } => 0x5000,
+                        ParsedInstruction::Or { .. } => 0x5400,
+                        ParsedInstruction::Xor { .. } => 0x5600,
+                        _ => unreachable!(),
+                    };
                     let mut opcode: u16 = base_opcode;
                     let s_val = encode_register(s_reg) as u16;
                     let d_val = encode_register(d_reg) as u16;
-                    opcode |= (s_val & 0x0F) << 4;
+                    opcode |= (s_val & 0x0F) << 5;
                     opcode |= d_val & 0x0F;
+                    opcode |= (s_val | d_val) & 0x10;
                     bytes.extend_from_slice(&opcode.to_le_bytes());
                 }
                 _ => return Err(EncodeError::UnsupportedInstruction),

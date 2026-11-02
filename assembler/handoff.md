@@ -1,5 +1,21 @@
 # TMS34010 Rust Assembler - Project Handoff
 
+## Current checkpoint
+
+The native build/link/output pipeline works, but machine-code correctness is still incomplete. A strict link proves symbol resolution, not executable equivalence. **Prioritize an instruction-by-instruction encoder audit before further payload-size chasing.** Several instruction families still emit placeholder zero words or unaudited opcodes.
+
+| Area | Latest verified state |
+| --- | --- |
+| Build/link | 51 modules, strict link with zero unresolved/out-of-range relocations |
+| Outputs | 14-section COFF, two 512 KiB ROM halves, combined 1 MiB ROM |
+| Regression checks | Four Rust tests pass, including golden opcode words and register aliases |
+| ROM comparison | 914,606 differing bytes; first difference at byte 0 |
+| Section extents | `.text` short by 18,068 bytes; `.data` short by 13,606 bytes; BSS 64 bytes over |
+| Proven data matches | TEXT both sections; PAL data with matching preserved inputs (non-relocation bytes and relocation sites) |
+| Baseline limitations | PAL/ATTRACT input differences; PLYRSEQ2 and BB3 preserved source do not fully reproduce their preserved objects |
+
+The numbered status entries below are implementation history; this checkpoint and Section 6 contain the active status and priorities.
+
 ## 1. Project Overview
 
 A modern, native Rust assembler designed for the TMS34010 arcade graphics processor. The goal is to replace legacy DOSBox-based assembly pipelines with a fast, robust, modular tool capable of generating interleaved binary ROM images for physical arcade hardware and MAME.
@@ -107,14 +123,18 @@ A modern, native Rust assembler designed for the TMS34010 arcade graphics proces
 - Added `assembler/compare_object.py` for repeatable native-JSON versus TI COFF v0 object diagnostics. It reports section extents, 32-bit relocation-site agreement, and common-offset differences outside legacy relocation fields. It explicitly declines the non-relocation byte comparison for unsupported legacy relocation types and does not claim linked target equivalence. Example: `python compare_object.py build/PAL.OBJ ../BACKUP/XCODE101L/PAL.OBJ`. `--output build/diagnostics/report.json` saves the JSON report. Direct checks confirm TEXT matches in both sections, preserved-input PAL matches in data, and current-input PAL reports the expected -7,664-byte delta.
 - PAL's native build dependencies now include its head-table, palette, and mugshot inputs; PLYRSEQ2 now tracks the previously omitted `pass.tbl` dependency. PLYRSEQ2's preserved-source assembly still differs from the preserved object (native `.text` 8,932 bytes / `.data` 11,016 bytes versus legacy 12,786 / 12,788). The legacy object defines `cower_t`, `ffall_t`, and `fflyback_t`, which are absent from both current and preserved PLYRSEQ2 source, so its extent deficits cannot be treated as proof of dropped encodings. Diagnostic objects are stored as JSON under `build/diagnostics`, keeping the production object set at 51. Production payload/ROM totals are unchanged from the preceding strict build; `git diff --check` passes.
 
+- Status review exposed fundamental opcode errors rather than just payload omissions. Compared PAL's opening instructions with its legacy object and the primary [MAME TMS34010 disassembler](https://github.com/mamedev/mame/blob/master/src/devices/cpu/tms34010/34010dsm.cpp). Corrected NOP to 0x0300 (including branch fall-through substitutions), six-byte MOVI to 0x09E0 plus destination/register-file bits, register MOVE to 0x4C00/0x4E00, and register ADD/SUB/AND/OR/XOR opcode bases, source shifts, and register-file bits. CLR now parses as XOR of a register with itself and occupies two bytes rather than an incorrect six-byte immediate move. Immediate MOVI still conservatively uses the long form; other immediate arithmetic, shifts, branches, memory addressing, and other instruction families still need auditing.
+- The first sweep exposed `CLR OFFSET`/`CLR COLOR0`: register `.set` aliases had previously become zero-valued constants. Pass one now records register aliases and substitutes them in instruction operands, resolving OFFSET to B4 and COLOR0 to B8. Golden reference tests cover NOP, MOVI in both files, CLR, register MOVE within/across files, register ALU forms, and the alias cases. All four tests and the final consistent 51-object strict build pass. ROM differences are now 914,606 bytes, first at byte 0. `.text` is 0x390520 bits versus 0x3B39C0 (18,068 bytes short); data remains 0x3AA7B0 bits (13,606 bytes short), BSS remains 64 bytes over. Correctly shrinking CLR increases the text-size deficit; size alone must not be used as a correctness score.
+- BB3 diagnostic assembly using preserved inputs still differs from its preserved object: before this opcode batch, text was 10,868 versus 13,610 bytes and data was 4,448 versus 6,950. The first data mismatch is after the four crowd headers (byte 56): the legacy object has 154 additional bytes before CRTPC1, which begins at 210 versus native 56. Thus even preserved BB3 inputs do not reproduce the legacy data layout. Its text also has relocation type 0x18, for which the comparison tool correctly declines a non-relocation byte-equivalence claim. Added its referenced crowd/court/cheer/outdoor tables and relevant equates to the native build dependencies. Diagnostic reports remain under `build/diagnostics`; graphics inputs were not changed.
+
 
 ## 6. Next Steps
 
 The next implementation steps are:
 
-1. Classify BB3's `.text` (2,824 bytes short) and `.data` (2,502 bytes short) differences using preserved-source assembly and `compare_object.py`; then inspect PLYRAT3 `.data` (2,484 bytes short). PAL data is confirmed correct with matching inputs; PLYRSEQ2 requires a source baseline matching its legacy object before its size deficit is actionable. Investigate code encoding/layout using modules whose inputs match: PAL still has a 176-byte text excess with preserved source. ATTRACT exceeds legacy in both sections and has confirmed background-source differences. TEXT matches both legacy section extents; IMGTBL `.data` remains 338 bytes short.
-2. Reconcile the remaining 0x200-bit (64-byte) BSS excess and inspect whether the 18 modules without BSS metadata actually declare allocations; compare vectors and all section ranges with `BB.CMD` and `BB.MAP`.
-3. After payload and section extents match, compare the strict native combined ROM byte-for-byte with the legacy image. Current linked output differs in 916,829 bytes and is not final validation.
+1. Continue the ISA audit with independent golden opcode tests and the primary MAME decoder/legacy objects. Urgent: instructions currently emitted as zero placeholders include INC, DEC, ANDN, MOVX/MOVY, rotates, FILL, PIXT, and TRAP. Audit branch/call/return forms, memory MOVE/addressing, immediate ALU forms, and shifts as well. Preserve relocation width/offset consistency when correcting sizes. Implement short MOVI only with matching layout/fixup support. Do not treat the current linked ROM as executable validation.
+2. Establish source baselines that actually match the preserved objects before interpreting section deficits as encoder bugs. PAL data is proven correct with preserved inputs; PLYRSEQ2/BB3 have confirmed baseline discrepancies. Classify PLYRAT3's data difference next when returning to this work. Keep using `compare_object.py`, including its explicit limitation for unsupported relocation kinds.
+3. After the code audit and source reconciliation, resolve the 64-byte BSS excess and compare vector/section ranges, then perform final byte and runtime validation. Latest ROM comparison: 914,606 differing bytes.
 4. Keep graphics replacement and GSP changes separate until the program-ROM linker passes byte comparison.
 
 Graphics replacement remains separate and must not be included in the linker implementation commit.

@@ -1190,7 +1190,7 @@ pub fn parse_cmpi(input: &str) -> IResult<&str, ParsedInstruction> {
     Ok((input, ParsedInstruction::Cmp { src, dst }))
 }
 
-/// Parse CLR instruction (e.g., "CLR A0" -> translates to MOVE #0, A0)
+/// CLR is the register XOR instruction with identical source and destination.
 pub fn parse_clr(input: &str) -> IResult<&str, ParsedInstruction> {
     let (input, _) = tag_no_case("CLR")(input)?;
     let (input, _) = multispace1(input)?;
@@ -1198,10 +1198,9 @@ pub fn parse_clr(input: &str) -> IResult<&str, ParsedInstruction> {
 
     Ok((
         input,
-        ParsedInstruction::Move {
-            src: Operand::Immediate(0),
+        ParsedInstruction::Xor {
+            src: dst.clone(),
             dst,
-            field: None,
         },
     ))
 }
