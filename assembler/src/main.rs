@@ -1,6 +1,6 @@
 use clap::Parser;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -151,6 +151,21 @@ fn is_symbolic_expression(value: &str) -> bool {
         }
     }
     value.chars().any(|ch| ch.is_ascii_alphabetic() || ch == '_' || ch == '#')
+}
+
+fn expression_references_symbol(value: &str, names: &HashSet<String>) -> bool {
+    let mut token = String::new();
+    for ch in value.chars().chain(std::iter::once(' ')) {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '#' {
+            token.push(ch.to_ascii_uppercase());
+        } else {
+            if names.contains(&token) {
+                return true;
+            }
+            token.clear();
+        }
+    }
+    false
 }
 
 #[derive(Serialize, Clone)]
@@ -557,14 +572,14 @@ impl Assembler {
         let mut pending_equates: Vec<(String, String)> = Vec::new();
         let mut current_macro: Option<MacroTemplate> = None;
         let mut macro_expansion_count = 0usize;
+        let mut volatile_symbols = HashSet::<String>::new();
 
-        let mut line_queue: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
-        let mut idx = 0;
+        let mut line_queue: VecDeque<String> = lines.iter().map(|s| s.to_string()).collect();
+        let mut processed_lines = 0usize;
         let mut conditionals: Vec<ConditionalFrame> = Vec::new();
 
-        while idx < line_queue.len() {
-            let raw_line = line_queue[idx].clone();
-            idx += 1;
+        while let Some(raw_line) = line_queue.pop_front() {
+            processed_lines += 1;
 
             let clean_line = parser::sanitize_line(&raw_line);
             let mut trimmed_owned = clean_line.trim().to_string();
@@ -576,6 +591,7 @@ impl Assembler {
             }
             let mut trimmed = trimmed_owned.as_str();
             let upper_trimmed = trimmed.to_uppercase();
+            let line_num = processed_lines; // approximate
 
             let conditional_directive = upper_trimmed.split_whitespace().next().unwrap_or("");
             if conditional_directive == ".IF"
@@ -602,6 +618,54 @@ impl Assembler {
 
             if !conditionals.iter().all(|frame| frame.branch_taken) {
                 continue;
+            }
+
+            // Expand TI .loop blocks before parsing so table-generating macros
+            // emit each iteration with the current .eval values.
+            if conditional_directive == ".LOOP" {
+                let count_expr = trimmed.splitn(2, char::is_whitespace).nth(1).unwrap_or("0");
+                let count = self.eval_arithmetic(count_expr);
+                if !(0..=8192).contains(&count) {
+                    return Err(AsmError::Parse {
+                        line: line_num,
+                        message: format!(".loop count {count} is outside 0..=8192"),
+                    });
+                }
+                let mut depth = 1usize;
+                let mut body = Vec::new();
+                let mut found_end = false;
+                while let Some(candidate_line) = line_queue.pop_front() {
+                    let candidate = parser::sanitize_line(&candidate_line);
+                    let directive = candidate.trim().split_whitespace().next().unwrap_or("");
+                    if directive.eq_ignore_ascii_case(".loop") {
+                        depth += 1;
+                    } else if directive.eq_ignore_ascii_case(".endloop") {
+                        depth -= 1;
+                        if depth == 0 {
+                            found_end = true;
+                            break;
+                        }
+                    }
+                    body.push(candidate_line);
+                }
+                if !found_end {
+                    return Err(AsmError::Parse {
+                        line: line_num,
+                        message: "missing .endloop".to_string(),
+                    });
+                }
+                for _ in 0..count {
+                    for body_line in body.iter().rev() {
+                        line_queue.push_front(body_line.clone());
+                    }
+                }
+                continue;
+            }
+            if conditional_directive.eq_ignore_ascii_case(".ENDLOOP") {
+                return Err(AsmError::Parse {
+                    line: line_num,
+                    message: "unexpected .endloop without .loop".to_string(),
+                });
             }
 
             // 1a. Check for Single-Line Macros
@@ -657,8 +721,6 @@ impl Assembler {
                 continue;
             }
 
-            let line_num = idx; // approximate
-
             // 4. Check for .equ Equates FIRST (before labels)
             let constant_parts: Vec<&str> = upper_trimmed.split_whitespace().collect();
             let is_set_constant = constant_parts.len() >= 3
@@ -709,24 +771,31 @@ impl Assembler {
             // 6. Check if this line is a Macro Invocation
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
             if !parts.is_empty() {
-                let potential_macro_name = parts[0].to_uppercase();
-                if let Some(macro_template) = self
+                let direct = self
                     .macro_table
-                    .get(&potential_macro_name)
+                    .get(&parts[0].to_uppercase())
                     .cloned()
-                    .filter(|template| {
-                        template.params.is_empty()
-                            || !trimmed[parts[0].len()..].trim().is_empty()
-                    })
-                {
-                    let arg_str = trimmed[parts[0].len()..].trim();
-                    let args: Vec<String> = arg_str
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
+                    .map(|template| (template, 0usize, None));
+                let labeled = if parts.len() > 1 {
+                    self.macro_table
+                        .get(&parts[1].to_uppercase())
+                        .cloned()
+                        .map(|template| (template, trimmed.find(parts[1]).unwrap_or(parts[0].len()), Some(parts[0])))
+                } else {
+                    None
+                };
+                let macro_call = direct.or(labeled).filter(|(template, start, _)| {
+                    template.params.is_empty() || !trimmed[start + parts[if *start == 0 { 0 } else { 1 }].len()..].trim().is_empty()
+                });
+                if let Some((macro_template, macro_start, label)) = macro_call {
+                    let macro_name_len = if macro_start == 0 { parts[0].len() } else { parts[1].len() };
+                    let arg_str = trimmed[macro_start + macro_name_len..].trim();
+                    let args = parser::split_asm_operands(arg_str);
 
                     let mut expanded_lines = Vec::new();
+                    if let Some(label) = label {
+                        expanded_lines.push(label.to_string());
+                    }
                     let mut local_labels: HashMap<String, String> = HashMap::new();
                     for body_line in &macro_template.body {
                         let mut expanded = substitute_macro_parameters(
@@ -758,7 +827,10 @@ impl Assembler {
                         expanded_lines.push(expanded);
                     }
                     macro_expansion_count += 1;
-                    line_queue.splice(idx..idx, expanded_lines);                    continue;
+                    for expanded_line in expanded_lines.into_iter().rev() {
+                        line_queue.push_front(expanded_line);
+                    }
+                    continue;
                 }
             }
 
@@ -1022,6 +1094,11 @@ impl Assembler {
                 if name.eq_ignore_ascii_case(".WORD") || name.eq_ignore_ascii_case(".LONG") {
                     for arg in &mut args {
                         *arg = arg.trim_start_matches('#').trim().to_string();
+                        if !arg.starts_with('[')
+                            && expression_references_symbol(arg, &volatile_symbols)
+                        {
+                            *arg = self.eval_arithmetic(arg).to_string();
+                        }
                     }
                 }
 
@@ -1031,13 +1108,21 @@ impl Assembler {
                     self.current_address += (args.len() * 4) as u32;
                 }
                 if name.eq_ignore_ascii_case(".asg") || name.eq_ignore_ascii_case(".eval") {
-                    if let Some(arg) = args.first() {
-                        let parts: Vec<&str> = arg.split(',').collect();
-                        if parts.len() >= 2 {
-                            let alias = parts[1].trim();
-                            if !alias.is_empty() {
-                                let value = self.eval_arithmetic(parts[0].trim()) as u32;
-                                self.symbol_table.insert(alias.to_string(), value);
+                    let assignment = if args.len() >= 2 {
+                        Some((args[0].as_str(), args[1].as_str()))
+                    } else {
+                        args.first().and_then(|arg| {
+                            arg.split_once(',')
+                                .map(|(expression, alias)| (expression, alias))
+                        })
+                    };
+                    if let Some((expression, alias)) = assignment {
+                        let alias = alias.trim();
+                        if !alias.is_empty() {
+                            let value = self.eval_arithmetic(expression.trim()) as u32;
+                            self.symbol_table.insert(alias.to_string(), value);
+                            if name.eq_ignore_ascii_case(".eval") {
+                                volatile_symbols.insert(alias.to_ascii_uppercase());
                             }
                         }
                     }
