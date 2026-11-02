@@ -61,17 +61,19 @@ A modern, native Rust assembler designed for the TMS34010 arcade graphics proces
 - Legacy `.set` directives and `.set`/`.equ` numeric constants are now recognized without treating inline instruction operands as constants; legacy `400h` values are supported.
 - The Python linker now recognizes compound relocation expressions and preserves absolute constants separately from section symbols. Remaining expression work is to resolve symbolic `.equ` chains (for example `TM_X+189` and `ADJ_ULY-20`) rather than recording them as zero.
 - Recent full-object validation reached linker expression diagnosis successfully; final clean rebuild/link validation remains in progress after expression-symbol fixes.
+- Rust pass one now retains `.equ`/`.set` source expressions and reevaluates them after labels are collected, allowing forward symbol references and equate chains to be represented in the symbol table.
+- The encoder now errors on known 8-bit relative branch offsets outside -128..127 instead of clamping them. The Python linker likewise rejects out-of-range relative relocations. Long-branch expansion is still outstanding; the legacy map is not yet used to define a safe expansion sequence.
+- Object generation emits `absolute16` fixups for `.WORD` expressions containing symbols; symbolic `MOVI` operands use the existing `absolute32` fixup path. The linker applies both widths.
+- The experimental linker can now take `--cmd-file SRC/BB.CMD`; `build.ps1 -ObjectFormat` passes that file so legacy-listed modules are placed in command-file order, with additional modules appended afterward. It also rejects text/data payloads larger than the ROM region defined by `BB.CMD` (origin `0xFF800000`, length `0x7F6F00`). The legacy map confirms separate packed `.text` then `.data` ranges; byte-for-byte layout reconciliation has not yet been completed.
 
 ## 6. Next Steps
 
-The next logical implementation step is relocation correctness in the modern program linker:
+The next implementation steps are:
 
-1. Resolve symbolic `.equ` and `.set` expressions in the Rust assembler (including forward references), preserving numeric values for the linker instead of emitting zero-valued constants.
-2. Extend PC-relative branch support for out-of-range relocations; first replace the current encoder clamp with explicit known-branch expansion and add equivalent linker fixups for the expanded instruction sequence.
-3. Add explicit relocation kinds for address fixups emitted by `MOVI` and `.WORD` operands, then apply them in `link.py` (many may share the `absolute32` encoding).
-4. Reconcile the experimental flat layout with `SRC/BB.CMD` and legacy section addresses/sizes.
-5. Generate `BB.OUT` in a format compatible with the legacy ROM conversion tools.
-6. Add native ROM conversion/splitting to `assembler/build.ps1` and compare output with the DOSBox reference artifacts byte-for-byte.
-7. Keep graphics replacement and GSP changes separate until the program-ROM linker passes byte comparison.
+1. Define and implement a correct long-branch expansion for out-of-range branches, including equivalent linker fixups for expanded sequences.
+2. Validate linker section addresses and sizes against all entries in `SRC/BB.CMD` and `BACKUP/XCODE101L/BB.MAP`, including initialized vectors and uninitialized memory sections.
+3. Generate `BB.OUT` in a format compatible with the legacy ROM conversion tools.
+4. Add native ROM conversion/splitting to `assembler/build.ps1` and compare output with the DOSBox reference artifacts byte-for-byte.
+5. Keep graphics replacement and GSP changes separate until the program-ROM linker passes byte comparison.
 
 Graphics replacement remains separate and must not be included in the linker implementation commit.

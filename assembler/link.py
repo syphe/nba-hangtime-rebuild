@@ -14,6 +14,28 @@ ROM_LENGTH = 0x7F6F00
 FILL = 0xFF
 
 
+def order_from_cmd(objects, cmd_path: Path):
+    """Order supplied object files as listed in the legacy linker command file."""
+    by_name = {path.name.upper(): (path, obj) for path, obj in objects}
+    listed_names = []
+    for line in cmd_path.read_text(errors="replace").splitlines():
+        line = re.sub(r"/\*.*?\*/", "", line).strip()
+        match = re.match(r"([^\s]+\.OBJ)\b", line, re.IGNORECASE)
+        if match:
+            listed_names.append(match.group(1).upper())
+
+    ordered = []
+    used = set()
+    for name in listed_names:
+        if name in by_name and name not in used:
+            ordered.append(by_name[name])
+            used.add(name)
+    # Keep objects absent from the legacy command file so new modules still link,
+    # after all explicitly ordered legacy inputs.
+    ordered.extend(item for item in objects if item[0].name.upper() not in used)
+    return ordered
+
+
 def section_name(name: str) -> str:
     lowered = name.lower()
     if lowered == "text" or lowered == ".text":
@@ -84,9 +106,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("objects", nargs="+", type=Path)
     parser.add_argument("--output", type=Path, default=Path("build/BB.bin"))
+    parser.add_argument("--cmd-file", type=Path)
     args = parser.parse_args()
 
     objects = load_objects(args.objects)
+    if args.cmd_file:
+        objects = order_from_cmd(objects, args.cmd_file)
     text_cursor = ROM_BASE
     symbols = {}
     symbol_kinds = {}
@@ -99,6 +124,17 @@ def main():
         if section_name(section["name"]) == "text"
     )
     data_cursor = ROM_BASE + text_size
+    total_rom_size = text_size + sum(
+        len(base64.b64decode(section["data"]))
+        for _, obj in objects
+        for section in obj.get("sections", [])
+        if section_name(section["name"]) == "data"
+    )
+    if total_rom_size > ROM_LENGTH:
+        raise ValueError(
+            f"text/data sections require 0x{total_rom_size:X} bytes, "
+            f"exceeding the BB.CMD ROM region (0x{ROM_LENGTH:X})"
+        )
 
     for path, obj in objects:
         section_addresses = {}

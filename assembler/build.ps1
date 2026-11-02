@@ -142,7 +142,7 @@ if ($ObjectFormat) {
             $object = Join-Path $outputDir "$module.OBJ"
             if (Test-Path $object) { $object }
         }
-            & python link.py @objects --output (Join-Path $outputDir "BB.bin")
+            & python link.py @objects --cmd-file (Join-Path $sourceDir "BB.CMD") --output (Join-Path $outputDir "BB.bin")
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     finally {
