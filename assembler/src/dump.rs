@@ -133,6 +133,7 @@ fn describe(instr: &ParsedInstruction) -> String {
         }
         ParsedInstruction::Jmp { target } => format!("JMP {}", fmt_operand(target)),
         ParsedInstruction::Rets => "RETS".to_string(),
+        ParsedInstruction::Reti => "RETI".to_string(),
         ParsedInstruction::Usect {
             name,
             section,
@@ -147,7 +148,7 @@ fn describe(instr: &ParsedInstruction) -> String {
         ParsedInstruction::Pixt { src, dst } => {
             format!("PIXT {}, {}", fmt_operand(src), fmt_operand(dst))
         }
-        ParsedInstruction::Dsjs { reg, target } => format!("DSJS {}, {}", fmt_operand(reg), target),
+        ParsedInstruction::Dsjs { reg, target, short } => format!("{} {}, {}", if *short { "DSJS" } else { "DSJ" }, fmt_operand(reg), target),
         ParsedInstruction::Calla { target } => format!("CALLA {}", fmt_operand(target)),
         ParsedInstruction::Btst { src, dst } => {
             format!("BTST {}, {}", fmt_operand(src), fmt_operand(dst))

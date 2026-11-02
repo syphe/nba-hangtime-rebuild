@@ -160,6 +160,7 @@ pub enum ParsedInstruction {
         target: Operand,
     },
     Rets,
+    Reti,
     Usect {
         name: String,
         section: String,
@@ -169,6 +170,7 @@ pub enum ParsedInstruction {
         vector: i32,
     },
     Dsjs {
+        short: bool,
         reg: Operand,
         target: String,
     },
@@ -1059,7 +1061,8 @@ pub fn parse_jmp(input: &str) -> IResult<&str, ParsedInstruction> {
 }
 
 pub fn parse_rets(input: &str) -> IResult<&str, ParsedInstruction> {
-    map(tag_no_case("rets"), |_| ParsedInstruction::Rets)(input)
+    alt((map(tag_no_case("rets"), |_| ParsedInstruction::Rets),
+         map(tag_no_case("reti"), |_| ParsedInstruction::Reti)))(input)
 }
 
 // pub fn parse_usect(input: &str) -> IResult<&str, ParsedInstruction> {
@@ -1433,7 +1436,7 @@ pub fn parse_andi(input: &str) -> IResult<&str, ParsedInstruction> {
 
 /// Parse DSJS / DSJ instruction (e.g., "DSJS A2, SFC_iloop" or "DSJS A0, $")
 pub fn parse_dsjs(input: &str) -> IResult<&str, ParsedInstruction> {
-    let (input, _) = alt((tag_no_case("DSJS"), tag_no_case("DSJ")))(input)?;
+    let (input, mnemonic) = alt((tag_no_case("DSJS"), tag_no_case("DSJ")))(input)?;
     let (input, _) = multispace1(input)?;
     let (input, reg) = parse_operand(input)?;
     let (input, _) = delimited(multispace0, char(','), multispace0)(input)?;
@@ -1444,6 +1447,7 @@ pub fn parse_dsjs(input: &str) -> IResult<&str, ParsedInstruction> {
     Ok((
         input,
         ParsedInstruction::Dsjs {
+            short: mnemonic.eq_ignore_ascii_case("DSJS"),
             reg,
             target: target.to_string(),
         },

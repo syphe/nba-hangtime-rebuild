@@ -15,6 +15,28 @@ ROM_LENGTH_BYTES = ROM_LENGTH_BITS // 8
 FILL = 0xFF
 
 
+def relative_fixup_bytes(kind, source, target, opcode):
+    """Encode a relative field; source points to that field in TMS bit units."""
+    delta = target - (source + 16)
+    if delta % 16:
+        raise ValueError(f"unaligned relative target 0x{target:X} from 0x{source:X}")
+    relative = delta // 16
+    if kind == "tms34010-relative16":
+        if not -32768 <= relative <= 32767:
+            raise ValueError(f"long relative displacement {relative} is outside -32768..32767")
+        return struct.pack("<h", relative)
+    if kind == "tms34010-dsjs5":
+        if not -31 <= relative <= 31:
+            raise ValueError(f"DSJS displacement {relative} is outside -31..31")
+        word = (opcode & 0xF81F) | (0x400 if relative < 0 else 0) | (abs(relative) << 5)
+        return struct.pack("<H", word)
+    if kind != "tms34010-relative":
+        raise ValueError(f"unknown relative fixup kind {kind!r}")
+    if relative == 0 or not -127 <= relative <= 127:
+        raise ValueError(f"short relative displacement {relative} is reserved or out of range")
+    return struct.pack("<H", (opcode & 0xFF00) | (relative & 0xFF))
+
+
 def order_from_cmd(objects, cmd_path: Path):
     """Order supplied object files as listed in the legacy linker command file."""
     by_name = {path.name.upper(): (path, obj) for path, obj in objects}
@@ -458,35 +480,20 @@ def main():
                         )
                     rom[start:start + 4] = struct.pack("<I", target & 0xFFFFFFFF)
                 continue
-            if fixup.get("kind") == "tms34010-relative16":
-                relative = (target - (source + 16)) // 16
-                if relative < -32768 or relative > 32767:
-                    if args.allow_unresolved:
-                        unresolved_fixups.append((path, fixup["symbol"]))
-                        continue
-                    raise ValueError(
-                        f"{path}: long relative relocation {fixup['symbol']!r} at 0x{source:X} "
-                        f"is out of range ({relative} words; expected -32768..32767)"
-                    )
-                start = (source - rom_base) // 8
-                if start < 0 or start + 2 > len(rom):
-                    raise ValueError(f"{path}: long relative fixup is outside the ROM image")
-                rom[start:start + 2] = struct.pack("<h", relative)
-                continue
-            relative = (target - (source + 16)) // 16
-            if relative < -128 or relative > 127:
+            start = (source - rom_base) // 8
+            if start < 0 or start + 2 > len(rom):
+                raise ValueError(f"{path}: relative fixup is outside the ROM image")
+            try:
+                patched = relative_fixup_bytes(fixup.get("kind"), source, target,
+                                               struct.unpack_from("<H", rom, start)[0])
+            except ValueError as error:
                 if args.allow_unresolved:
                     unresolved_fixups.append((path, fixup["symbol"]))
                     continue
-                raise ValueError(
-                    f"{path}: relative relocation {fixup['symbol']!r} at 0x{source:X} "
-                    f"is out of range ({relative} words; expected -128..127)"
-                )
-            short_relative_count += 1
-            start = (source - rom_base) // 8
-            if start < 0 or start + 2 > len(rom):
-                raise ValueError(f"{path}: fixup is outside the ROM image")
-            rom[start + 1] = relative & 0xFF
+                raise ValueError(f"{path}: {fixup['symbol']!r}: {error}") from error
+            rom[start:start + 2] = patched
+            if fixup.get("kind") != "tms34010-relative16":
+                short_relative_count += 1
 
     if unresolved_fixups:
         unique = sorted({f"{path.name}: {symbol}" for path, symbol in unresolved_fixups})

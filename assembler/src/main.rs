@@ -322,6 +322,7 @@ impl ObjectFile {
                     Operand::Symbol(name) => Some(name.as_str()),
                     _ => None,
                 },
+                Instruction::Dsjs { target, .. } if target != "$" => Some(target.as_str()),
                 Instruction::Move { src: Operand::Symbol(name), .. } => Some(name.as_str()),
                 _ => None,
             };
@@ -344,7 +345,9 @@ impl ObjectFile {
                     );
                     let kind = match &instruction {
                         Instruction::Calla { .. } | Instruction::Move { .. } => "absolute32",
-                        Instruction::Jacc { .. } => "absolute32",
+                        Instruction::Jacc { .. } | Instruction::Jmp { .. } => "absolute32",
+                        Instruction::Dsjs { short: true, .. } => "tms34010-dsjs5",
+                        Instruction::Dsjs { short: false, .. } => "tms34010-relative16",
                         _ if matches!(instruction, Instruction::Call { .. } | Instruction::Callr { .. }) && encoded.len() == 6 => "absolute32",
                         _ if is_rel_branch && encoded.len() == 6 => "absolute32",
                         Instruction::Call { .. } | Instruction::Callr { .. } => "tms34010-relative16",
@@ -449,8 +452,9 @@ fn layout_instruction_size(instruction: &Instruction, address: u32, symbols: &Sy
 
 fn external_absolute_transfer<'a>(instruction: &'a Instruction, ast: &[Instruction]) -> Option<(u16, &'a str)> {
     let (opcode, target) = match instruction {
-        Instruction::Call { label } | Instruction::Callr { label } => (0xEB00, label.as_str()),
+        Instruction::Call { label } | Instruction::Callr { label } => (0x0D40, label.as_str()),
         Instruction::Jr { label } => (0xC080, label.as_str()),
+        Instruction::Jmp { target: Operand::Symbol(label) } => (0xC080, label.as_str()),
         Instruction::Jeq { label } => (0xCA80, label.as_str()),
         Instruction::Jne { label } => (0xCB80, label.as_str()),
         Instruction::Jlt { target } => (0xC480, target.as_str()),
@@ -459,6 +463,9 @@ fn external_absolute_transfer<'a>(instruction: &'a Instruction, ast: &[Instructi
         Instruction::LongJrcc { condition, target } => (0xC080 | ((*condition as u16) << 8), target.as_str()),
         _ => return None,
     };
+    if matches!(instruction, Instruction::Call { .. }) && parser::parse_register(target).is_ok_and(|(rest, _)| rest.is_empty()) {
+        return None;
+    }
     let local = ast.iter().any(|candidate| matches!(candidate, Instruction::Label(name) if name.eq_ignore_ascii_case(target)));
     (!local).then_some((opcode, target))
 }
@@ -473,6 +480,47 @@ pub struct Assembler {
 #[cfg(test)]
 mod loop_expression_tests {
     use super::*;
+
+    #[test]
+    fn branch_and_call_words_match_reference_and_reserved_displacements_expand() {
+        for condition in 0..16 {
+            let mut symbols = SymbolTable::default();
+            symbols.insert("target".into(), 4);
+            let instruction = Instruction::Jrcc { condition, target: "target".into() };
+            assert_eq!(encoder::encode_instruction(&instruction, 0, &symbols).unwrap(),
+                       (0xc001u16 | ((condition as u16) << 8)).to_le_bytes());
+        }
+        for (source, pc, target, words) in [
+            ("jr target", 254, 2, vec![0xc081u16]),
+            ("jr target", 254, 0, vec![0xc000, 0xff7f]),
+            ("jr target", 0, 2, vec![0xc000, 0xffff]),
+            ("jr target", 0, 258, vec![0xc000, 0x007f]),
+            ("jr target", 0, 0x20000, vec![0xc080, 0, 2]),
+            ("callr target", 0, 4, vec![0x0d20, 0]),
+            ("callr target", 0, 0x20000, vec![0x0d40, 0, 2]),
+            ("dsj b3,target", 0, 0, vec![0x0d93, 0xfffe]),
+            ("dsjs b3,target", 0, 0, vec![0x3c33]),
+        ] {
+            let mut symbols = SymbolTable::default();
+            symbols.insert("target".into(), target);
+            let (_, instruction) = parser::parse_line(source).unwrap();
+            assert_eq!(encoder::encode_instruction(&instruction, pc, &symbols).unwrap(),
+                       words.into_iter().flat_map(u16::to_le_bytes).collect::<Vec<_>>(), "{source}");
+        }
+        let mut assembler = Assembler::new();
+        let ast = assembler.pass_one(&["jreq next", "next", "reti"]).unwrap();
+        assert_eq!(assembler.pass_two(&ast).unwrap(), vec![0, 0xca, 0, 0, 0x40, 9]);
+        let object = ObjectFile::from_assembler(Path::new("test.asm"), &assembler, &ast, &assembler.pass_two(&ast).unwrap());
+        assert_eq!(object.fixups[0].kind, "tms34010-relative16");
+        assert_eq!(object.fixups[0].offset, 2);
+        for (source, expected) in [("call a2", 0x0922u16), ("call b2", 0x0932),
+                                   ("jmp a2", 0x0162), ("reti", 0x0940)] {
+            let mut assembler = Assembler::new();
+            let ast = assembler.pass_one(&[source]).unwrap();
+            assert_eq!(assembler.pass_two(&ast).unwrap(), expected.to_le_bytes(), "{source}");
+            assert!(external_absolute_transfer(&ast[0], &ast).is_none());
+        }
+    }
 
     #[test]
     fn graphics_and_rotate_opcodes_match_reference_and_reject_invalid_modes() {
@@ -955,6 +1003,7 @@ impl Assembler {
                             | "JMP"
                             | "NOP"
                             | "RETS"
+                            | "RETI"
                             | "SLL"
                             | "SRL"
                             | "SLA"
@@ -1059,6 +1108,7 @@ impl Assembler {
                                     | "JMP"
                                     | "NOP"
                                     | "RETS"
+                            | "RETI"
                                     | "SLL"
                                     | "SRL"
                                     | "SLA"
